@@ -1,0 +1,15 @@
+{
+  "name": "一级菜单示例",
+  "version": "1.0",
+  "order": 40,
+  "enabled": false,
+  "match": {
+    "contexts": ["any"]
+  },
+  "items": [
+    {
+      "text": "直接放到一级菜单的动作",
+      "command": "notepad.exe"
+    }
+  ]
+}

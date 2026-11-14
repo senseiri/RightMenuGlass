@@ -1,0 +1,19 @@
+{
+  "name": "图片工具",
+  "version": "1.0",
+  "order": 30,
+  "match": {
+    "contexts": ["files"],
+    "extensions": [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"]
+  },
+  "items": [
+    {
+      "text": "用画图打开",
+      "command": "mspaint.exe \"%1\""
+    },
+    {
+      "text": "复制文件名",
+      "command": "cmd.exe /c echo %N| clip"
+    }
+  ]
+}

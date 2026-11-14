@@ -1,0 +1,26 @@
+{
+  "name": "命令行工具",
+  "version": "1.0",
+  "author": "RightMenuGlass",
+  "enabled": true,
+  "order": 10,
+  "group": "工具",
+  "match": {
+    "contexts": ["folder", "background", "desktop"]
+  },
+  "items": [
+    {
+      "text": "在此处打开命令行",
+      "command": "cmd.exe /k cd /d \"%D\""
+    },
+    {
+      "text": "在此处打开 PowerShell",
+      "command": "powershell.exe -NoExit -Command \"Set-Location -LiteralPath '%D'\""
+    },
+    {
+      "text": "以管理员身份打开命令行",
+      "command": "cmd.exe /k cd /d \"%D\"",
+      "admin": true
+    }
+  ]
+}

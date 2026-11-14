@@ -1,0 +1,18 @@
+# build outputs
+bin/
+build/
+dist/
+
+# test artifacts
+out/
+backup/
+poc/
+tools/
+
+# transient files
+*.o
+*.a
+*.old.exe
+*.bak
+*.bmp
+*.log
