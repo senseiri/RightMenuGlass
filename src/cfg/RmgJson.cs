@@ -22,6 +22,7 @@ namespace RmgCfg {
         public static JVal NewStr(string s) { JVal v = new JVal(); v.T = TStr; v.S = s == null ? "" : s; return v; }
         public static JVal NewBool(bool b) { JVal v = new JVal(); v.T = TBool; v.B = b; return v; }
         public static JVal NewInt(int n) { JVal v = new JVal(); v.T = TNum; v.N = n; return v; }
+        public static JVal NewNum(double d) { JVal v = new JVal(); v.T = TNum; v.N = d; return v; }
     }
 
     public static class Json {

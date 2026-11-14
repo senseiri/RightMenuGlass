@@ -182,8 +182,12 @@ Config DefaultConfig() {
         { L"paste",  L"\u7c98\u8d34", L"\uE77F", true },
         { L"rename", L"\u91cd\u547d\u540d", L"\uE8AC", true },
         { L"delete", L"\u5220\u9664", L"\uE74D", true },
-        { L"props",  L"\u5c5e\u6027", L"\uE713", true },
+        { L"rmgcfg", L"\u8bbe\u7f6e", L"\uE713", true },
     };
+    // Ships with the author's own setup: if 7-Zip is installed, its entries go straight
+    // to the first level instead of disappearing into the "more" submenu. Harmless on
+    // machines without 7-Zip: the id simply never matches a recorded group.
+    c.thirdParty.promoteGroups.push_back(PromoteGroup{ L"grp:00b5399818201f72", L"7-Zip", true });
     return c;
 }
 
@@ -225,6 +229,13 @@ Config LoadConfig() {
     if ((v = root.get(L"colors"))) {
         c.colors.enabled = GetCfgBool(v, L"enabled", c.colors.enabled);
         c.colors.perPixel = GetCfgBool(v, L"perPixel", c.colors.perPixel);
+        // colorUnit wins when present; older configs only carry perPixel.
+        c.colors.colorUnit = GetCfgStr(v, L"colorUnit", c.colors.colorUnit);
+        if (c.colors.colorUnit != L"pixel" && c.colors.colorUnit != L"glyph" &&
+            c.colors.colorUnit != L"item") {
+            c.colors.colorUnit = c.colors.perPixel ? L"pixel" : L"item";
+        }
+        c.colors.perPixel = (c.colors.colorUnit != L"item");
         c.colors.darkText = GetCfgStr(v, L"darkText", c.colors.darkText);
         c.colors.lightText = GetCfgStr(v, L"lightText", c.colors.lightText);
         c.colors.threshold = GetCfgInt(v, L"threshold", c.colors.threshold);
@@ -246,18 +257,60 @@ Config LoadConfig() {
         c.acrylic.shadow = GetCfgInt(v, L"shadow", c.acrylic.shadow);
         c.acrylic.margin = GetCfgInt(v, L"margin", c.acrylic.margin);
     }
+    if ((v = root.get(L"animation"))) {
+        c.animation.enabled = GetCfgBool(v, L"enabled", c.animation.enabled);
+        c.animation.mode = GetCfgStr(v, L"mode", c.animation.mode);
+        c.animation.durationMs = GetCfgInt(v, L"durationMs", c.animation.durationMs);
+        c.animation.fromOpacity = GetCfgInt(v, L"fromOpacity", c.animation.fromOpacity);
+        c.animation.fromScale = GetCfgInt(v, L"fromScale", c.animation.fromScale);
+        c.animation.fromOffsetY = GetCfgInt(v, L"fromOffsetY", c.animation.fromOffsetY);
+        const JsonValue* cur = v->get(L"curve");
+        if (cur && cur->type == JsonValue::Array && cur->arr.size() == 4) {
+            c.animation.bx1 = cur->arr[0].num;
+            c.animation.by1 = cur->arr[1].num;
+            c.animation.bx2 = cur->arr[2].num;
+            c.animation.by2 = cur->arr[3].num;
+        }
+        // "mode" only decides whether the animation runs at all; the numbers below it
+        // are always honoured so a hand-edited config behaves exactly as written.
+        std::wstring m = ToLowerW(c.animation.mode);
+        if (m == L"none") {
+            c.animation.durationMs = 0;
+        } else if (c.animation.durationMs <= 0 || c.animation.durationMs > 2000) {
+            if (m == L"fast") c.animation.durationMs = 120;
+            else if (m == L"elegant") c.animation.durationMs = 420;
+            else c.animation.durationMs = 220;
+        }
+        if (c.animation.durationMs > 0) {
+            if (c.animation.fromOpacity < 0) c.animation.fromOpacity = 0;
+            if (c.animation.fromOpacity > 100) c.animation.fromOpacity = 100;
+            if (c.animation.fromScale < 60) c.animation.fromScale = 60;
+            if (c.animation.fromScale > 100) c.animation.fromScale = 100;
+            if (c.animation.fromOffsetY < 0) c.animation.fromOffsetY = 0;
+            if (c.animation.fromOffsetY > 64) c.animation.fromOffsetY = 64;
+        }
+    }
     if ((v = root.get(L"style"))) {
         c.style.fontFamily = GetCfgStr(v, L"fontFamily", c.style.fontFamily);
         c.style.fontFile = GetCfgStr(v, L"fontFile", c.style.fontFile);
         c.style.fontSize = GetCfgInt(v, L"fontSize", c.style.fontSize);
         c.style.itemHeight = GetCfgInt(v, L"itemHeight", c.style.itemHeight);
         c.style.iconSize = GetCfgInt(v, L"iconSize", c.style.iconSize);
+        c.style.headerHeight = GetCfgInt(v, L"headerHeight", c.style.headerHeight);
+        if (c.style.headerHeight < 18) c.style.headerHeight = 18;
+        if (c.style.headerHeight > 120) c.style.headerHeight = 120;
         c.style.minWidth = GetCfgInt(v, L"minWidth", c.style.minWidth);
         c.style.maxWidth = GetCfgInt(v, L"maxWidth", c.style.maxWidth);
         c.style.maxHeight = GetCfgInt(v, L"maxHeight", c.style.maxHeight);
         c.style.showShortcut = GetCfgBool(v, L"showShortcut", c.style.showShortcut);
         c.style.showCheckmarks = GetCfgBool(v, L"showCheckmarks", c.style.showCheckmarks);
         c.style.hoverDelayMs = GetCfgInt(v, L"hoverDelayMs", c.style.hoverDelayMs);
+        c.style.openDirection = GetCfgStr(v, L"openDirection", c.style.openDirection);
+        if (c.style.openDirection != L"right-down" && c.style.openDirection != L"right-up" &&
+            c.style.openDirection != L"left-down" && c.style.openDirection != L"left-up" &&
+            c.style.openDirection != L"auto") {
+            c.style.openDirection = L"right-down";
+        }
     }
     if ((v = root.get(L"thirdParty"))) {
         c.thirdParty.enabled = GetCfgBool(v, L"enabled", c.thirdParty.enabled);
@@ -336,26 +389,36 @@ void SaveDefaultConfigIfMissing() {
         L"  \"colors\": {\n"
         L"    \"enabled\": true,\n"
         L"    \"perPixel\": true,\n"
+        L"    \"colorUnit\": \"pixel\",\n"
         L"    \"darkText\": \"#000000\",\n"
         L"    \"lightText\": \"#FFFFFF\",\n"
         L"    \"threshold\": 140,\n"
-        L"    \"softness\": 6,\n"
-        L"    \"haloWidth\": 1,\n"
-        L"    \"haloAlpha\": 40,\n"
+        L"    \"softness\": 2,\n"
+        L"    \"haloWidth\": 2,\n"
+        L"    \"haloAlpha\": 30,\n"
         L"    \"extraDark\": \"\",\n"
         L"    \"extraLight\": \"\"\n"
         L"  },\n"
         L"  \"acrylic\": {\n"
         L"    \"enabled\": true,\n"
-        L"    \"blurRadius\": 18,\n"
-        L"    \"opacity\": 58,\n"
+        L"    \"blurRadius\": 10,\n"
+        L"    \"opacity\": 0,\n"
         L"    \"tint\": \"#202020\",\n"
         L"    \"autoTint\": true,\n"
         L"    \"lightTint\": \"#F3F3F5\",\n"
-        L"    \"noise\": 5,\n"
+        L"    \"noise\": 0,\n"
         L"    \"corner\": 10,\n"
         L"    \"shadow\": 14,\n"
         L"    \"margin\": 10\n"
+        L"  },\n"
+        L"  \"animation\": {\n"
+        L"    \"enabled\": true,\n"
+        L"    \"mode\": \"elegant\",\n"
+        L"    \"durationMs\": 420,\n"
+        L"    \"fromOpacity\": 0,\n"
+        L"    \"fromScale\": 93,\n"
+        L"    \"fromOffsetY\": 12,\n"
+        L"    \"curve\": [0.22, 1.0, 0.36, 1.0]\n"
         L"  },\n"
         L"  \"style\": {\n"
         L"    \"fontFamily\": \"Microsoft YaHei UI\",\n"
@@ -363,12 +426,14 @@ void SaveDefaultConfigIfMissing() {
         L"    \"fontSize\": 9,\n"
         L"    \"itemHeight\": 32,\n"
         L"    \"iconSize\": 16,\n"
+        L"    \"headerHeight\": 32,\n"
         L"    \"minWidth\": 180,\n"
         L"    \"maxWidth\": 520,\n"
         L"    \"maxHeight\": 720,\n"
         L"    \"showShortcut\": true,\n"
         L"    \"showCheckmarks\": true,\n"
-        L"    \"hoverDelayMs\": 320\n"
+        L"    \"hoverDelayMs\": 320,\n"
+        L"    \"openDirection\": \"right-down\"\n"
         L"  },\n"
         L"  \"thirdParty\": {\n"
         L"    \"enabled\": true,\n"
@@ -377,9 +442,11 @@ void SaveDefaultConfigIfMissing() {
         L"    \"submenuTitleIcon\": true,\n"
         L"    \"keepTop\": [],\n"
         L"    \"hide\": [],\n"
-        L"    \"promoteGroups\": [],\n"
+        L"    \"promoteGroups\": [\n"
+        L"      { \"id\": \"grp:00b5399818201f72\", \"name\": \"7-Zip\", \"all\": true }\n"
+        L"    ],\n"
         L"    \"promoteItems\": [],\n"
-        L"    \"mergePromoted\": false,\n"
+        L"    \"mergePromoted\": true,\n"
         L"    \"mergedTitle\": \"\u5e38\u7528\u5de5\u5177\"\n"
         L"  },\n"
         L"  \"buttons\": [\n"
@@ -388,7 +455,7 @@ void SaveDefaultConfigIfMissing() {
         L"    { \"cmd\": \"paste\",  \"label\": \"\u7c98\u8d34\",   \"icon\": \"\\uE77F\", \"enabled\": true },\n"
         L"    { \"cmd\": \"rename\", \"label\": \"\u91cd\u547d\u540d\", \"icon\": \"\\uE8AC\", \"enabled\": true },\n"
         L"    { \"cmd\": \"delete\", \"label\": \"\u5220\u9664\",   \"icon\": \"\\uE74D\", \"enabled\": true },\n"
-        L"    { \"cmd\": \"props\",  \"label\": \"\u5c5e\u6027\",   \"icon\": \"\\uE713\", \"enabled\": true }\n"
+        L"    { \"cmd\": \"rmgcfg\", \"label\": \"\u8bbe\u7f6e\",   \"icon\": \"\\uE713\", \"enabled\": true }\n"
         L"  ]\n"
         L"}\n";
     WriteFileTextW(path, json);

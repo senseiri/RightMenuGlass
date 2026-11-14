@@ -19,6 +19,8 @@
 static const wchar_t* kMenuClass = L"RMG_CustomMenuWnd";
 static const int kTimerSub = 1;
 static const int kTimerLeave = 2;
+static const int kTimerAnim = 3;
+static const int kAnimFrameMs = 15;
 // Grace period before submenus fold away when the pointer leaves the whole chain.
 // Long enough to let the pointer travel diagonally from a parent item into its submenu.
 static const int kLeaveDelayMs = 220;
@@ -76,6 +78,15 @@ struct UiWindow {
     // submenu would spring open under the pointer before the user does anything.
     bool mouseMoved = false;
     POINT shownAt = {0, 0};
+    // pop-up animation state; animBase is the final (100%) rectangle
+    bool animating = false;
+    ULONGLONG animStart = 0;
+    int animDurMs = 0;
+    int animFromOpacity = 100;
+    int animFromScale = 100;
+    int animFromOffY = 0;
+    double animBez[4] = {0.16, 0.84, 0.44, 1.0};
+    RECT animBase = {0, 0, 0, 0};
 };
 
 struct UiState {
@@ -225,7 +236,7 @@ static bool LooksThirdParty(const std::wstring& text) {
         L"使用", L"上传到", L"上传", L"分享到", L"分享",
         L"同步至", L"备份到", L"打包", L"加密", L"解密",
         L"粉碎", L"扫描病毒", L"编辑器", L"mediainfo",
-        L"wps", L"office", L"福昕", L"foxit",
+        L"wps", L"office", L"福昕", L"foxit", L"批量",
         L"压缩文件", L"压缩到", L"添加到",
         L"解压到", L"添加压缩", L"解压"
     };
@@ -393,8 +404,11 @@ static void ApplyThirdParty(UiState* ui, std::vector<UiItem>& items, bool root) 
     for (auto& it : items) {
         if (it.d.separator) { keep.push_back(it); continue; }
         if (MatchAny(it.d.text, tp.hide)) continue;
-        bool isThird = !IsHardSystem(it.d.text) &&
-                       (LooksThirdParty(it.d.text) || (!IsSystemKeyword(it.d.text) && !it.d.popup));
+        // Vendor keywords win over the hard-system list: a tool that calls
+        // its entry "批量重命名" is a third-party entry even though
+        // it contains the shell word "重命名".
+        bool isThird = LooksThirdParty(it.d.text) ||
+                       (!IsHardSystem(it.d.text) && !IsSystemKeyword(it.d.text) && !it.d.popup);
         if (!isThird) { keep.push_back(it); continue; }
         if (MatchAny(it.d.text, tp.keepTop)) { keep.push_back(it); continue; }
         if (ItemPromoted(tp, it, groups)) { it.promote = true; keep.push_back(it); continue; }
@@ -485,24 +499,23 @@ static int FitSpan(int pos, int lo, int hi) {
     return pos;
 }
 
-// Same clamp, but a window that had to move also drifts a quarter of the remaining slack
-// toward the middle of the span. Near a screen corner that reads as "the menu slides toward
-// the centre" instead of sitting flush against the bezel.
-static int FitSpanTowardCenter(int pos, int lo, int hi) {
-    int r = FitSpan(pos, lo, hi);
-    if (r == pos || lo >= hi) return r;
-    int mid = (lo + hi) / 2;
-    r += (mid - r) / 4;
-    if (r < lo) r = lo;
-    if (r > hi) r = hi;
-    return r;
+// The icon bar shrinks its own buttons when the bar is short, so setting a small
+// headerHeight keeps the icons evenly spaced instead of clipping them.
+static int HeaderButtonSize(const UiWindow* w) {
+    int dpi = w->dpi;
+    int btn = ScalePx(30, dpi);
+    int room = w->headerH - ScalePx(4, dpi);
+    if (room > 0 && btn > room) btn = room;
+    int floorSz = ScalePx(14, dpi);
+    if (btn < floorSz) btn = floorSz;
+    return btn;
 }
 
 static void LayoutWindow(UiWindow* w, POINT anchor) {
     UiState* ui = w->ui;
     int dpi = w->dpi;
     w->pad = ScalePx(ui->cfg.acrylic.margin, dpi);
-    w->headerH = w->isRoot ? ScalePx(40, dpi) : 0;
+    w->headerH = w->isRoot ? ScalePx(ui->cfg.style.headerHeight, dpi) : 0;
     w->itemH = ScalePx(ui->cfg.style.itemHeight, dpi);
     w->iconSz = ScalePx(ui->cfg.style.iconSize, dpi);
     w->corner = ScalePx(ui->cfg.acrylic.corner, dpi);
@@ -522,7 +535,7 @@ static void LayoutWindow(UiWindow* w, POINT anchor) {
     }
     if (w->isRoot && !ui->cfg.buttons.empty()) {
         int n = (int)ui->cfg.buttons.size();
-        int btn = ScalePx(30, dpi);
+        int btn = HeaderButtonSize(w);
         int gap = ScalePx(4, dpi);
         int bw = n * btn + (n - 1) * gap + w->pad * 2;
         if (bw > contentW) contentW = bw;
@@ -568,11 +581,36 @@ static void LayoutWindow(UiWindow* w, POINT anchor) {
     int x = anchor.x;
     int y = anchor.y;
     if (w->isRoot) {
-        // The root menu opens at the pointer and never flips to the far side of it: when a
-        // corner would clip the menu it slides toward the middle of the screen instead, which
-        // also keeps the pointer and the menu in the same half of the screen.
-        x = FitSpanTowardCenter(x, loX, hiX);
-        y = FitSpanTowardCenter(y, loY, hiY);
+        // The root menu opens towards the configured direction (default down-right, i.e. its
+        // top-left corner sits on the pointer). If that would leave the work area it flips to
+        // the opposite side of the pointer, so the card stays visible and points at the middle
+        // of the screen. Only when neither side fits does it fall back to clamping.
+        const std::wstring& dir = ui->cfg.style.openDirection;
+        bool right = true;
+        bool down = true;
+        if (dir == L"right-up") {
+            down = false;
+        } else if (dir == L"left-down") {
+            right = false;
+        } else if (dir == L"left-up") {
+            right = false;
+            down = false;
+        } else if (dir == L"auto") {
+            right = anchor.x < (work.left + work.right) / 2;
+            down = anchor.y < (work.top + work.bottom) / 2;
+        }
+        int px = right ? anchor.x : anchor.x - w->winW;
+        if (px > hiX || px < loX) {
+            int flipped = right ? (anchor.x - w->winW) : anchor.x;
+            px = (flipped >= loX && flipped <= hiX) ? flipped : FitSpan(px, loX, hiX);
+        }
+        int py = down ? anchor.y : anchor.y - w->winH;
+        if (py > hiY || py < loY) {
+            int flipped = down ? (anchor.y - w->winH) : anchor.y;
+            py = (flipped >= loY && flipped <= hiY) ? flipped : FitSpan(py, loY, hiY);
+        }
+        x = px;
+        y = py;
     } else {
         // Submenus stay glued to the parent item: prefer the right side, fall back to the
         // left, and centre only when neither side has room.
@@ -610,8 +648,65 @@ static void EnsureVisible(UiWindow* w, int idx) {
 // ------------------------------------------------------------
 //  painting
 // ------------------------------------------------------------
+// Hands a premultiplied BGRA layer to the compositor. The layer is the whole window, so the
+// card can be scaled and faded without the window ever painting a stale screenshot around it.
+static void PresentLayered(HWND hwnd, const Bitmap32& bm, int dstW, int dstH, int alphaPct) {
+    if (!hwnd || !IsWindow(hwnd) || bm.w <= 0 || bm.h <= 0 || dstW <= 0 || dstH <= 0) return;
+    if (alphaPct < 0) alphaPct = 0;
+    if (alphaPct > 100) alphaPct = 100;
+
+    HDC screen = GetDC(NULL);
+    if (!screen) return;
+    HDC mem = CreateCompatibleDC(screen);
+    if (!mem) { ReleaseDC(NULL, screen); return; }
+
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = dstW;
+    bi.bmiHeader.biHeight = -dstH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = NULL;
+    HBITMAP dib = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!dib || !bits) { DeleteDC(mem); ReleaseDC(NULL, screen); return; }
+    HGDIOBJ old = SelectObject(mem, dib);
+
+    if (dstW == bm.w && dstH == bm.h) {
+        memcpy(bits, bm.px.data(), (size_t)bm.w * (size_t)bm.h * 4);
+    } else {
+        Bitmap32 scaled;
+        ResamplePremultiplied(bm, dstW, dstH, scaled);
+        if (scaled.w == dstW && scaled.h == dstH) memcpy(bits, scaled.px.data(), (size_t)dstW * (size_t)dstH * 4);
+        else memset(bits, 0, (size_t)dstW * (size_t)dstH * 4);
+    }
+
+    SIZE sz = { dstW, dstH };
+    POINT srcPt = { 0, 0 };
+    BLENDFUNCTION bf;
+    bf.BlendOp = AC_SRC_OVER;
+    bf.BlendFlags = 0;
+    bf.SourceConstantAlpha = (BYTE)(alphaPct * 255 / 100);
+    bf.AlphaFormat = AC_SRC_ALPHA;
+    UpdateLayeredWindow(hwnd, screen, NULL, &sz, mem, &srcPt, 0, &bf, ULW_ALPHA);
+
+    SelectObject(mem, old);
+    DeleteObject(dib);
+    DeleteDC(mem);
+    ReleaseDC(NULL, screen);
+}
+
 static void BlitBitmap(HWND hwnd, const Bitmap32& bm) {
     if (bm.w <= 0 || bm.h <= 0) return;
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int cw = rc.right - rc.left;
+    int ch = rc.bottom - rc.top;
+    if (cw <= 0 || ch <= 0) { cw = bm.w; ch = bm.h; }
+    if (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) {
+        PresentLayered(hwnd, bm, cw, ch, 100);
+        return;
+    }
     HDC dc = GetDC(hwnd);
     if (!dc) return;
     BITMAPINFO bi = {};
@@ -621,8 +716,17 @@ static void BlitBitmap(HWND hwnd, const Bitmap32& bm) {
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
-    SetDIBitsToDevice(dc, 0, 0, bm.w, bm.h, 0, 0, 0, bm.h,
-        (void*)bm.px.data(), &bi, DIB_RGB_COLORS);
+    if (cw == bm.w && ch == bm.h) {
+        SetDIBitsToDevice(dc, 0, 0, bm.w, bm.h, 0, 0, 0, bm.h,
+            (void*)bm.px.data(), &bi, DIB_RGB_COLORS);
+    } else {
+        // The pop-up animation resizes the window for a few frames; stretch the
+        // pre-rendered card instead of re-laying it out on every tick.
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, NULL);
+        StretchDIBits(dc, 0, 0, cw, ch, 0, 0, bm.w, bm.h,
+            (void*)bm.px.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+    }
     ReleaseDC(hwnd, dc);
 }
 
@@ -679,12 +783,25 @@ static void PaintWindow(UiWindow* w) {
     int softness = ScalePx(cc.softness, dpi);   // 过渡带宽同样跟随 DPI
     int haloW = ScalePx(cc.haloWidth, dpi);     // 描边宽度（0 = 关闭）
     int haloA = cc.haloAlpha;                   // 描边强度
+    // 0 = per pixel, 1 = per glyph, 2 = per menu item (see draw.h).
+    int colorUnit = 0;
+    if (cc.colorUnit == L"glyph") colorUnit = 1;
+    else if (cc.colorUnit == L"item") colorUnit = 2;
+    if (!cc.enabled) {
+        // Smart colouring switched off: paint every glyph in one fixed ink, without sampling
+        // the backdrop at all. The colour is colors.darkText so the user still picks it.
+        // No fade and no rim either - both only make sense relative to the backdrop.
+        light = dark;
+        softness = 0;
+        haloA = 0;
+        colorUnit = 0;
+    }
     int textGap = ScalePx(8, dpi);
     COLORREF lineColor = RGB(128, 128, 128);
 
     if (w->isRoot) {
         w->nBtn = 0;
-        int btn = ScalePx(30, dpi);
+        int btn = HeaderButtonSize(w);
         int gap = ScalePx(4, dpi);
         int bx = w->contentX + w->pad;
         int by = w->contentY + w->pad + (w->headerH - btn) / 2;
@@ -706,7 +823,7 @@ static void PaintWindow(UiWindow* w) {
                 int gy = rr.top + (btn - (int)gsz.cy) / 2;
                 bool en = (i < (int)ui->btnEnabled.size()) ? ui->btnEnabled[i] : false;
                 DrawGlyphColored(canvas, gx, gy, glyph, ui->iconFont,
-                    dark, light, threshold, en ? 92 : 38, softness, haloW, haloA);
+                    dark, light, threshold, en ? 92 : 38, softness, haloW, haloA, colorUnit);
             }
             bx += btn + gap;
         }
@@ -736,7 +853,7 @@ static void PaintWindow(UiWindow* w) {
         int tx = w->contentX + w->pad;
         if (it.d.checked) {
             DrawGlyphColored(canvas, tx + ScalePx(2, dpi), y + (ih - w->iconSz) / 2, 0xE73E,
-                ui->iconFont, dark, light, threshold, 85, softness, haloW, haloA);
+                ui->iconFont, dark, light, threshold, 85, softness, haloW, haloA, colorUnit);
         }
         tx += w->iconSz + textGap;
 
@@ -744,21 +861,21 @@ static void PaintWindow(UiWindow* w) {
         int ty = y + (ih - (int)tsz.cy) / 2;
         int alpha = disabled ? 40 : 96;
         DrawStringColored(canvas, tx, ty, it.d.text, ui->font,
-            dark, light, threshold, alpha, 1, 1, disabled ? 8 : 24, softness, haloW, haloA);
+            dark, light, threshold, alpha, 1, 1, disabled ? 8 : 24, softness, haloW, haloA, colorUnit);
 
         if (ui->cfg.style.showShortcut && !it.d.shortcut.empty()) {
             SIZE ssz = MeasureTextSize(ui->font, it.d.shortcut);
             int sx = w->contentX + w->contentW - w->pad - (int)ssz.cx - ScalePx(6, dpi);
             if (it.d.popup || it.customPopup) sx -= ScalePx(16, dpi);
             DrawStringColored(canvas, sx, y + (ih - (int)ssz.cy) / 2, it.d.shortcut, ui->font,
-                dark, light, threshold, 52, 1, 1, 14, softness, haloW, haloA);
+                dark, light, threshold, 52, 1, 1, 14, softness, haloW, haloA, colorUnit);
         }
         if (it.d.popup || it.customPopup) {
             int ax = w->contentX + w->contentW - w->pad - ScalePx(14, dpi);
             int asz = ScalePx(10, dpi);
             int ay = y + (ih - asz) / 2;
             DrawGlyphColored(canvas, ax, ay, 0xE76C, ui->iconFont,
-                dark, light, threshold, disabled ? 30 : 78, softness, haloW, haloA);
+                dark, light, threshold, disabled ? 30 : 78, softness, haloW, haloA, colorUnit);
         }
         y += ih;
     }
@@ -1046,7 +1163,11 @@ static UiWindow* CreateMenuWindow(UiState* ui, std::vector<UiItem> items, bool i
     LayoutWindow(w, anchor);
     ui->wins.push_back(w);
     EnsureMenuClass(ui->hinst);
-    w->hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kMenuClass, L"",
+    // Always layered: the card plus its shadow go to the compositor as a genuinely transparent
+    // layer, so nothing outside the rounded rect is ever painted and the animation can scale
+    // and fade the card without leaving a square of stale desktop behind.
+    DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED;
+    w->hwnd = CreateWindowExW(exStyle, kMenuClass, L"",
         WS_POPUP, w->rect.left, w->rect.top, w->winW, w->winH,
         ui->owner, NULL, ui->hinst, w);
     if (!w->hwnd) {
@@ -1067,16 +1188,117 @@ static UiWindow* CreateMenuWindow(UiState* ui, std::vector<UiItem> items, bool i
     } else {
         acrylic = capture;
     }
-    CompositeMenuCover(capture, acrylic,
+    CompositeMenuLayer(acrylic,
         w->contentX, w->contentY, w->contentW, w->contentH,
         w->corner, w->shadow, w->bg);
     w->bgReady = true;
     return w;
 }
 
+// ------------------------------------------------------------
+//  pop-up animation
+// ------------------------------------------------------------
+static double BezierAxis(double t, double p1, double p2) {
+    double mt = 1.0 - t;
+    return 3.0 * mt * mt * t * p1 + 3.0 * mt * t * t * p2 + t * t * t;
+}
+
+// y of a cubic-bezier(x1,y1,x2,y2) at the given x, endpoints fixed at (0,0)/(1,1).
+static double BezierEase(double x, const double b[4]) {
+    if (x <= 0.0) return 0.0;
+    if (x >= 1.0) return 1.0;
+    double lo = 0.0, hi = 1.0, t = x;
+    for (int i = 0; i < 32; ++i) {
+        double cx = BezierAxis(t, b[0], b[2]);
+        if (cx < x) lo = t;
+        else hi = t;
+        t = (lo + hi) * 0.5;
+    }
+    return BezierAxis(t, b[1], b[3]);
+}
+
+static void AnimFrameAt(UiWindow* w, double t, int* outX, int* outY, int* outW, int* outH, int* outAlpha) {
+    double e = BezierEase(t, w->animBez);
+    int alpha = w->animFromOpacity + (int)((100 - w->animFromOpacity) * e + 0.5);
+    int sc = w->animFromScale + (int)((100 - w->animFromScale) * e + 0.5);
+    int offY = (int)(w->animFromOffY * (1.0 - e) + 0.5);
+    int sw = w->winW * sc / 100;
+    int sh = w->winH * sc / 100;
+    if (sw < 16) sw = 16;
+    if (sh < 16) sh = 16;
+    *outX = w->animBase.left + (w->winW - sw) / 2;
+    *outY = w->animBase.top + (w->winH - sh) / 2 + offY;
+    *outW = sw;
+    *outH = sh;
+    *outAlpha = alpha;
+}
+
+static void ApplyAnimFrame(UiWindow* w, double t) {
+    int x = 0, y = 0, cw = 0, ch = 0, alpha = 100;
+    AnimFrameAt(w, t, &x, &y, &cw, &ch, &alpha);
+    SetWindowPos(w->hwnd, HWND_TOPMOST, x, y, cw, ch, SWP_NOACTIVATE);
+    if (w->rendered) PresentLayered(w->hwnd, w->renderBuf, cw, ch, alpha);
+    else PaintWindow(w);
+}
+
+static void TickAnim(UiWindow* w) {
+    if (!w || !w->animating || !w->hwnd) return;
+    double t = 1.0;
+    if (w->animDurMs > 0) {
+        ULONGLONG now = GetTickCount64();
+        t = (double)(now - w->animStart) / (double)w->animDurMs;
+    }
+    if (t < 1.0) {
+        ApplyAnimFrame(w, t);
+        return;
+    }
+    w->animating = false;
+    KillTimer(w->hwnd, kTimerAnim);
+    SetWindowPos(w->hwnd, HWND_TOPMOST, w->animBase.left, w->animBase.top, w->winW, w->winH, SWP_NOACTIVATE);
+    if (w->rendered) BlitBitmap(w->hwnd, w->renderBuf);
+    else PaintWindow(w);
+}
+
+// While the card is still scaled down the client box is smaller than the laid-out
+// bitmap; map pointer coordinates back into layout space so hit-testing stays right.
+static void MapAnimPoint(UiWindow* w, int& mx, int& my) {
+    if (!w || !w->animating || !w->hwnd) return;
+    RECT rc;
+    GetClientRect(w->hwnd, &rc);
+    int cw = rc.right - rc.left;
+    int ch = rc.bottom - rc.top;
+    if (cw <= 0 || ch <= 0 || w->winW <= 0 || w->winH <= 0) return;
+    mx = mx * w->winW / cw;
+    my = my * w->winH / ch;
+}
+
 static void ShowBuiltWindow(UiWindow* w) {
     GetCursorPos(&w->shownAt);
     w->mouseMoved = false;
+    w->animBase = w->rect;
+    const AnimationConfig& an = w->ui->cfg.animation;
+    if (an.enabled && an.durationMs > 0) {
+        w->animating = true;
+        w->animStart = GetTickCount64();
+        w->animDurMs = an.durationMs;
+        w->animFromOpacity = an.fromOpacity;
+        w->animFromScale = an.fromScale;
+        w->animFromOffY = an.fromOffsetY;
+        w->animBez[0] = an.bx1;
+        w->animBez[1] = an.by1;
+        w->animBez[2] = an.bx2;
+        w->animBez[3] = an.by2;
+        int x = 0, y = 0, cw = 0, ch = 0, alpha = 100;
+        AnimFrameAt(w, 0.0, &x, &y, &cw, &ch, &alpha);
+        SetWindowPos(w->hwnd, HWND_TOPMOST, x, y, cw, ch, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetCapture(w->hwnd);
+        SetFocus(w->hwnd);
+        PaintWindow(w);
+        // The first paint presents the full-size layer; swap in the small, faint opening frame.
+        if (w->rendered) PresentLayered(w->hwnd, w->renderBuf, cw, ch, alpha);
+        SetTimer(w->hwnd, kTimerAnim, kAnimFrameMs, NULL);
+        return;
+    }
     SetWindowPos(w->hwnd, HWND_TOPMOST, w->rect.left, w->rect.top, w->winW, w->winH,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
     SetCapture(w->hwnd);
@@ -1213,6 +1435,7 @@ static LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         int mx = (short)LOWORD(lp);
         int my = (short)HIWORD(lp);
+        MapAnimPoint(w, mx, my);
         int hit = HitItem(w, mx, my);
         int hb = HitButton(w, mx, my);
         if (hit != w->hover || hb != w->hoverBtn) {
@@ -1248,6 +1471,7 @@ static LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         int mx = (short)LOWORD(lp);
         int my = (short)HIWORD(lp);
+        MapAnimPoint(w, mx, my);
         int hb = HitButton(w, mx, my);
         if (hb >= 0) {
             const std::wstring cmd = ToLowerW(w->ui->cfg.buttons[hb].cmd);
@@ -1269,7 +1493,9 @@ static LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_TIMER:
-        if (wp == kTimerSub && w) {
+        if (wp == kTimerAnim) {
+            TickAnim(w);
+        } else if (wp == kTimerSub && w) {
             KillTimer(hwnd, kTimerSub);
             if (w->hover >= 0) {
                 UiItem& it = w->items[w->hover];

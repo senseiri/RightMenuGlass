@@ -32,28 +32,46 @@ struct TopBarButton {
 
 struct ColorConfig {
     bool enabled = true;
-    bool perPixel = true;         // per-pixel text coloring based on local background
+    bool perPixel = true;         // legacy flag: true == colorUnit "pixel", false == "item"
+    // How much text shares one colour: "pixel" (a stroke may hold both colours),
+    // "glyph" (one colour per character, characters may differ) or "item" (one colour
+    // per menu entry). Kept as a string so new granularities can be added later.
+    std::wstring colorUnit = L"pixel";
     std::wstring darkText = L"#000000";   // text color on light background
     std::wstring lightText = L"#FFFFFF";  // text color on dark background
     int threshold = 140;          // 0..255 luminance split
-    int softness = 6;             // width of the cross-fade band around the split, 0 = hard switch
-    int haloWidth = 1;            // px of contrasting outline behind the glyphs, 0 = off
-    int haloAlpha = 40;           // 0..100 strength of that outline
+    int softness = 2;             // width of the cross-fade band around the split, 0 = hard switch
+    int haloWidth = 2;            // px of contrasting outline behind the glyphs, 0 = off
+    int haloAlpha = 30;           // 0..100 strength of that outline
     std::wstring extraDark = L""; // optional third color slot (unused by default)
     std::wstring extraLight = L"";
 };
 
 struct AcrylicConfig {
     bool enabled = true;
-    int blurRadius = 18;     // px
-    int opacity = 58;        // 0..100 tint strength
+    int blurRadius = 10;     // px
+    int opacity = 0;         // 0..100 tint strength
     std::wstring tint = L"#202020";       // dark backdrop tint
     bool autoTint = true;    // blend tint toward lightTint on bright backdrop
     std::wstring lightTint = L"#F3F3F5";  // light backdrop tint
-    int noise = 5;           // 0..40
+    int noise = 0;           // 0..40
     int corner = 10;         // px
     int shadow = 14;         // px
     int margin = 10;         // inner padding px
+};
+
+// Pop-up animation. The time curve is a cubic bezier so "custom" can dial any feel.
+struct AnimationConfig {
+    bool enabled = true;
+    std::wstring mode = L"elegant"; // none | fast | smooth | elegant | custom
+    int durationMs = 420;           // 0 = switch the animation off
+    int fromOpacity = 0;            // 0..100 starting window alpha
+    int fromScale = 93;             // 90..100 starting size, percent
+    int fromOffsetY = 12;           // px the card starts below its final position
+    double bx1 = 0.22;              // cubic-bezier(x1, y1, x2, y2)
+    double by1 = 1.0;
+    double bx2 = 0.36;
+    double by2 = 1.0;
 };
 
 struct MenuStyle {
@@ -62,12 +80,16 @@ struct MenuStyle {
     int fontSize = 9;        // pt
     int itemHeight = 32;     // logical px
     int iconSize = 16;
+    int headerHeight = 32;   // logical px, height of the icon bar; buttons shrink to fit
     int minWidth = 180;
     int maxWidth = 520;
     int maxHeight = 720;
     bool showShortcut = true;
     bool showCheckmarks = true;
     int hoverDelayMs = 320;
+    // Which side of the pointer the root menu opens towards: right-down | right-up |
+    // left-down | left-up | auto. "auto" picks whichever side faces the middle of the screen.
+    std::wstring openDirection = L"right-down";
 };
 
 // A whole vendor (identified by the icon group seen in real menus) that the
@@ -93,7 +115,7 @@ struct ThirdPartyConfig {
     std::vector<std::wstring> hide;      // keywords hidden entirely
     std::vector<PromoteGroup> promoteGroups;
     std::vector<PromoteItem> promoteItems;
-    bool mergePromoted = false;          // pack promoted entries into one first-level submenu
+    bool mergePromoted = true;           // pack promoted entries into one first-level submenu
     std::wstring mergedTitle = L"\u5e38\u7528\u5de5\u5177";
 };
 
@@ -104,6 +126,7 @@ struct Config {
     std::vector<TopBarButton> buttons;
     ColorConfig colors;
     AcrylicConfig acrylic;
+    AnimationConfig animation;
     MenuStyle style;
     ThirdPartyConfig thirdParty;
 };

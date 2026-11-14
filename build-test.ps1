@@ -16,6 +16,7 @@ $files = @(
   (Join-Path $src 'dll\hook.cpp'),
   (Join-Path $src 'dll\menu_ui.cpp'),
   (Join-Path $src 'dll\plugin.cpp'),
+  (Join-Path $src 'dll\provider.cpp'),
   (Join-Path $src 'dll\util.cpp')
 )
 $exe = Join-Path $out 'rmgtest.exe'

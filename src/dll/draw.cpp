@@ -232,6 +232,83 @@ void CompositeMenuCover(const Bitmap32& capture, const Bitmap32& acrylic, int cx
     }
 }
 
+void CompositeMenuLayer(const Bitmap32& acrylic, int cx, int cy, int cw, int ch, int corner, int shadow, Bitmap32& out) {
+    int r = std::max(0, corner);
+    int sh = std::max(1, shadow);
+    out.Resize(acrylic.w, acrylic.h);
+    for (int y = 0; y < out.h; ++y) {
+        for (int x = 0; x < out.w; ++x) {
+            float d = SdRoundRect((float)(x - cx) + 0.5f, (float)(y - cy) + 0.5f, (float)cw, (float)ch, (float)r);
+            float inside = std::clamp(-d + 0.5f, 0.0f, 1.0f);
+            uint32_t c = acrylic.At(x, y);
+            if (inside >= 0.999f) {
+                out.At(x, y) = c | 0xFF000000u;
+                continue;
+            }
+            if (inside > 0.0f) {
+                // Edge pixel: premultiply the card colour by its coverage so the rounded corner
+                // fades into the desktop instead of showing a hard stair step.
+                int a = (int)(inside * 255.0f + 0.5f);
+                int rr = (int)((c >> 16) & 0xFF) * a / 255;
+                int gg = (int)((c >> 8) & 0xFF) * a / 255;
+                int bb = (int)(c & 0xFF) * a / 255;
+                out.At(x, y) = ((uint32_t)a << 24) | ((uint32_t)rr << 16) | ((uint32_t)gg << 8) | (uint32_t)bb;
+                continue;
+            }
+            float t = std::clamp(d / (float)sh, 0.0f, 1.0f);
+            float k = 0.55f * (1.0f - t) * (1.0f - t);
+            int a = (int)(k * 255.0f + 0.5f);
+            if (a > 255) a = 255;
+            if (a < 0) a = 0;
+            out.At(x, y) = ((uint32_t)a << 24);   // premultiplied black
+        }
+    }
+}
+
+void ResamplePremultiplied(const Bitmap32& src, int w, int h, Bitmap32& out) {
+    if (w <= 0 || h <= 0 || src.w <= 0 || src.h <= 0) {
+        out.w = 0; out.h = 0; out.px.clear();
+        return;
+    }
+    out.Resize(w, h);
+    float rx = (float)src.w / (float)w;
+    float ry = (float)src.h / (float)h;
+    for (int y = 0; y < h; ++y) {
+        float fy = (y + 0.5f) * ry - 0.5f;
+        int y0 = (int)floorf(fy);
+        float ty = fy - (float)y0;
+        int y1 = y0 + 1;
+        if (y0 < 0) y0 = 0;
+        if (y0 > src.h - 1) y0 = src.h - 1;
+        if (y1 < 0) y1 = 0;
+        if (y1 > src.h - 1) y1 = src.h - 1;
+        const uint32_t* r0 = src.Row(y0);
+        const uint32_t* r1 = src.Row(y1);
+        uint32_t* dstRow = out.Row(y);
+        for (int x = 0; x < w; ++x) {
+            float fx = (x + 0.5f) * rx - 0.5f;
+            int x0 = (int)floorf(fx);
+            float tx = fx - (float)x0;
+            int x1 = x0 + 1;
+            if (x0 < 0) x0 = 0;
+            if (x0 > src.w - 1) x0 = src.w - 1;
+            if (x1 < 0) x1 = 0;
+            if (x1 > src.w - 1) x1 = src.w - 1;
+            uint32_t c00 = r0[x0], c10 = r0[x1], c01 = r1[x0], c11 = r1[x1];
+            uint32_t o = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                float v0 = (float)((c00 >> sh) & 0xFF) * (1.0f - tx) + (float)((c10 >> sh) & 0xFF) * tx;
+                float v1 = (float)((c01 >> sh) & 0xFF) * (1.0f - tx) + (float)((c11 >> sh) & 0xFF) * tx;
+                int v = (int)(v0 * (1.0f - ty) + v1 * ty + 0.5f);
+                if (v < 0) v = 0;
+                if (v > 255) v = 255;
+                o |= (uint32_t)v << sh;
+            }
+            dstRow[x] = o;
+        }
+    }
+}
+
 size_t MeasureTextWidth(HFONT font, const std::wstring& text) {
     SIZE s = MeasureTextSize(font, text);
     return (size_t)s.cx;
@@ -259,7 +336,7 @@ SIZE MeasureTextSize(HFONT font, const std::wstring& text) {
 void DrawStringColored(Bitmap32& dst, int x, int y, const std::wstring& text, HFONT font,
                        COLORREF dark, COLORREF light, int threshold, int alphaPct,
                        int shadowOffsetX, int shadowOffsetY, int shadowAlpha, int softness,
-                       int haloWidth, int haloAlpha) {
+                       int haloWidth, int haloAlpha, int colorUnit) {
     if (text.empty()) return;
     SIZE sz = MeasureTextSize(font, text);
     if (sz.cx <= 0 || sz.cy <= 0) return;
@@ -298,10 +375,13 @@ void DrawStringColored(Bitmap32& dst, int x, int y, const std::wstring& text, HF
     // text colours slide into each other across the boundary. Summed-area table keeps it O(1)
     // per glyph pixel.
     std::vector<int> lumSat;
-    // softness is the FULL width of the cross-fade band in pixels, so the averaging box is
-    // half that: the averaged luminance then sweeps the whole band instead of a quarter of it
-    // (which is why the first version looked like a hard switch even at 18px).
-    int radius = softness > 0 ? (softness > 240 ? 120 : softness / 2) : 0;
+    // softness is the full width of the cross-fade band in pixels, and the averaging box uses
+    // the same radius. A half-width box (the first take) tracked the backdrop too closely: on
+    // a photo wallpaper the averaged luminance still swung across the threshold inside a single
+    // stroke, so the "fade" collapsed into a two-pixel smudge instead of sliding.
+    if (colorUnit == 2) softness = 0;   // one colour for the whole run: nothing to cross-fade to
+    if (softness > 0 && softness < 8) softness = 8;   // see below: a tiny band looks dirty
+    int radius = softness > 0 ? (softness > 120 ? 120 : softness) : 0;
     int boxX = 0, boxY = 0, boxW = 0, boxH = 0;
     if (radius > 0) {
         boxX = std::max(0, x - pad - radius);
@@ -325,6 +405,52 @@ void DrawStringColored(Bitmap32& dst, int x, int y, const std::wstring& text, HF
             radius = 0;
         }
     }
+
+    // colorUnit == 2: sample the backdrop once for the whole run and reuse that value for
+    // every glyph pixel, so a word that straddles the split stays one colour.
+    int globalLum = -1;
+    if (colorUnit == 2) {
+        long long sum = 0;
+        int n = 0;
+        int bx0 = std::max(0, x - pad), by0 = std::max(0, y - pad);
+        int bx1 = std::min(dst.w, x - pad + mw), by1 = std::min(dst.h, y - pad + mh);
+        for (int py = by0; py < by1; ++py) {
+            for (int px = bx0; px < bx1; ++px) { sum += Luma255(dst.At(px, py)); ++n; }
+        }
+        if (n > 0) globalLum = (int)(sum / n);
+    }
+
+    // colorUnit == 1: one colour per character. The backdrop luminance is averaged over each
+    // character's own box, so a line can be black on its left half and white on its right
+    // while no single stroke is ever split between the two colours.
+    std::vector<int> glyphEdge;
+    std::vector<int> glyphLum;
+    if (colorUnit == 1) {
+        glyphEdge.push_back(0);
+        for (size_t i = 0; i < text.size(); ++i) {
+            glyphEdge.push_back((int)MeasureTextWidth(font, text.substr(0, i + 1)));
+        }
+        int gy0 = std::max(0, y);
+        int gy1 = std::min(dst.h, y + (int)sz.cy);
+        for (size_t i = 0; i < text.size(); ++i) {
+            int gx0 = std::max(0, x + glyphEdge[i]);
+            int gx1 = std::min(dst.w, x + glyphEdge[i + 1]);
+            long long sum = 0;
+            int n = 0;
+            for (int syp = gy0; syp < gy1; syp += 2) {
+                for (int sxp = gx0; sxp < gx1; sxp += 2) { sum += Luma255(dst.At(sxp, syp)); ++n; }
+            }
+            glyphLum.push_back(n > 0 ? (int)(sum / n) : -1);
+        }
+    }
+    auto glyphLumAt = [&](int dxPos) -> int {
+        if (glyphLum.empty()) return -1;
+        int rel = dxPos - x;
+        for (size_t i = 0; i < glyphLum.size(); ++i) {
+            if (rel >= glyphEdge[i] && rel < glyphEdge[i + 1]) return glyphLum[i];
+        }
+        return glyphLum.back();
+    };
 
     // Average luminance of the (2*radius+1)^2 box around one pixel, via the summed-area table.
     auto avgLum = [&](int px, int py) -> int {
@@ -364,6 +490,13 @@ void DrawStringColored(Bitmap32& dst, int x, int y, const std::wstring& text, HF
             fade = true;
             spanUp = lumMax - threshold;
             spanDown = threshold - lumMin;
+            // A backdrop that barely pokes past the split (lumMax = threshold + 4) used to
+            // finish the whole hand-off in four pixels - the short, dirty fade that reads as
+            // noise inside a glyph. Keep every hand-off at least one averaging box wide.
+            int minSpan = radius * 2;
+            if (minSpan < 24) minSpan = 24;
+            if (spanUp < minSpan) spanUp = minSpan;
+            if (spanDown < minSpan) spanDown = minSpan;
         }
     }
 
@@ -411,7 +544,12 @@ void DrawStringColored(Bitmap32& dst, int x, int y, const std::wstring& text, HF
                 if (!dst.Has(dx, dy)) continue;
                 uint32_t bg = dst.At(dx, dy);
                 int hl = Luma255(bg);
-                if (radius > 0) {
+                if (colorUnit == 2) {
+                    if (globalLum >= 0) hl = globalLum;
+                } else if (colorUnit == 1) {
+                    int gl = glyphLumAt(dx);
+                    if (gl >= 0) hl = gl;
+                } else if (radius > 0) {
                     int avg = avgLum(dx, dy);
                     if (avg >= 0) hl = avg;
                 }
@@ -446,7 +584,12 @@ void DrawStringColored(Bitmap32& dst, int x, int y, const std::wstring& text, HF
             if (!dst.Has(dx, dy)) continue;
             uint32_t bg = dst.At(dx, dy);
             int lum = Luma255(bg);
-            if (radius > 0) {
+            if (colorUnit == 2) {
+                if (globalLum >= 0) lum = globalLum;
+            } else if (colorUnit == 1) {
+                int gl = glyphLumAt(dx);
+                if (gl >= 0) lum = gl;
+            } else if (radius > 0) {
                 int avg = avgLum(dx, dy);
                 if (avg >= 0) lum = avg;
             }
@@ -478,10 +621,10 @@ void DrawStringColored(Bitmap32& dst, int x, int y, const std::wstring& text, HF
 
 void DrawGlyphColored(Bitmap32& dst, int x, int y, wchar_t glyph, HFONT iconFont,
                       COLORREF dark, COLORREF light, int threshold, int alphaPct, int softness,
-                      int haloWidth, int haloAlpha) {
+                      int haloWidth, int haloAlpha, int colorUnit) {
     std::wstring s(1, glyph);
     DrawStringColored(dst, x, y, s, iconFont, dark, light, threshold, alphaPct, 0, 0, 0, softness,
-                      haloWidth, haloAlpha);
+                      haloWidth, haloAlpha, colorUnit);
 }
 
 void FillRoundRect(Bitmap32& dst, int x, int y, int w, int h, int radius, uint32_t color, int alphaPct) {

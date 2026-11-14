@@ -35,12 +35,23 @@ namespace RmgCfg {
         ColorSwatch swTint, swLightTint;
 
         // 文字
-        CheckBox chkColors, chkPerPixel, chkShowShortcut, chkShowCheckmarks;
+        CheckBox chkColors, chkShowShortcut, chkShowCheckmarks;
+        ComboBox cboColorUnit;
         ColorSwatch swDark, swLight, swExtraDark, swExtraLight;
-        NumericUpDown numThreshold, numSoftness, numHaloW, numHaloA, numFontSize, numItemHeight, numIconSize, numMinW, numMaxW, numMaxH, numHoverDelay;
+        NumericUpDown numThreshold, numSoftness, numHaloW, numHaloA, numFontSize, numItemHeight, numIconSize, numHeaderH, numMinW, numMaxW, numMaxH, numHoverDelay;
         ComboBox cboFont;
+        ComboBox cboOpenDir;
         TextBox txtFontFile;
         Panel previewPanel;
+
+        // 动画
+        CheckBox chkAnim;
+        ComboBox cboAnimMode;
+        NumericUpDown numAnimDur, numAnimOpacity, numAnimScale, numAnimOffset;
+        NumericUpDown numBz1, numBz2, numBz3, numBz4;
+        Panel animPreview;
+        Timer animTimer;
+        double animProgress = 1.0;
 
         // 顶栏
         DataGridView grid;
@@ -124,12 +135,74 @@ namespace RmgCfg {
             }
         }
 
+        // Never print the real user profile path: screenshots of this window end up in
+        // the repository and it would leak the account name.
+        string ShownPath(string full) {
+            string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (localApp.Length > 0 && full.StartsWith(localApp, StringComparison.OrdinalIgnoreCase)) {
+                return "%LOCALAPPDATA%" + full.Substring(localApp.Length);
+            }
+            return full;
+        }
+
+        void ExportSettings() {
+            CollectFromUi();
+            SaveFileDialog dlg = new SaveFileDialog();
+            dlg.Title = "导出 RightMenuGlass 设置";
+            dlg.Filter = "RightMenuGlass 配置 (*.json)|*.json|所有文件 (*.*)|*.*";
+            dlg.FileName = "RightMenuGlass-config.json";
+            dlg.OverwritePrompt = true;
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            try {
+                File.WriteAllText(dlg.FileName, Json.Stringify(root, true) + "\r\n", new UTF8Encoding(false));
+                statusLabel.Text = "已导出：" + dlg.FileName;
+            } catch (Exception ex) {
+                MessageBox.Show("导出失败：\r\n" + ex.Message, "RightMenuGlass",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        void ImportSettings() {
+            OpenFileDialog dlg = new OpenFileDialog();
+            dlg.Title = "导入 RightMenuGlass 设置";
+            dlg.Filter = "RightMenuGlass 配置 (*.json)|*.json|所有文件 (*.*)|*.*";
+            dlg.CheckFileExists = true;
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            JVal parsed = null;
+            try {
+                parsed = Json.Parse(File.ReadAllText(dlg.FileName, Encoding.UTF8));
+            } catch (Exception ex) {
+                MessageBox.Show("这个文件不是有效的 JSON：\r\n" + ex.Message, "RightMenuGlass",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            if (parsed == null || parsed.T != JVal.TObj) {
+                MessageBox.Show("这不是一份 RightMenuGlass 配置文件（顶层必须是一个 JSON 对象）。",
+                                "RightMenuGlass", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string[] known = new string[] { "version", "enabled", "logVerbose", "colors", "acrylic",
+                                            "animation", "style", "thirdParty", "buttons" };
+            bool any = false;
+            for (int i = 0; i < known.Length && !any; i++) {
+                if (Json.Get(parsed, known[i]) != null) any = true;
+            }
+            if (!any) {
+                if (MessageBox.Show("这个文件里没有任何 RightMenuGlass 认识的字段，仍然导入吗？",
+                                    "RightMenuGlass", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            }
+            root = parsed;
+            LoadIntoUi();
+            ApplyMenuFontToUi();
+            statusLabel.Text = "已载入 " + Path.GetFileName(dlg.FileName) + "，点「保存并应用」后生效。";
+        }
+
         void SaveConfig() {
             CollectFromUi();
             try {
                 if (!Directory.Exists(cfgDir)) Directory.CreateDirectory(cfgDir);
                 File.WriteAllText(cfgPath, Json.Stringify(root, true) + "\n", new UTF8Encoding(false));
-                statusLabel.Text = "已保存：" + cfgPath;
+                statusLabel.Text = "已保存：" + ShownPath(cfgPath);
             } catch (Exception ex) {
                 MessageBox.Show("保存失败：\n" + ex.Message, "RightMenuGlass", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -202,6 +275,7 @@ namespace RmgCfg {
 
             tabs.TabPages.Add(BuildGeneralTab());
             tabs.TabPages.Add(BuildAppearanceTab());
+            tabs.TabPages.Add(BuildAnimationTab());
             tabs.TabPages.Add(BuildTextTab());
             tabs.TabPages.Add(BuildTopBarTab());
             tabs.TabPages.Add(BuildThirdPartyTab());
@@ -217,12 +291,7 @@ namespace RmgCfg {
             statusLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             // Never show the real user profile path (it leaks the account name in screenshots).
             // Display the environment variable form instead.
-            string shownCfg = cfgPath;
-            string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            if (localApp.Length > 0 && shownCfg.StartsWith(localApp, StringComparison.OrdinalIgnoreCase)) {
-                shownCfg = "%LOCALAPPDATA%" + shownCfg.Substring(localApp.Length);
-            }
-            statusLabel.Text = "配置：" + shownCfg;
+            statusLabel.Text = "配置：" + ShownPath(cfgPath);
             statusLabel.ForeColor = Color.FromArgb(110, 110, 110);
 
             Controls.Add(statusLabel);
@@ -245,7 +314,7 @@ namespace RmgCfg {
             p.Controls.Add(chkLogVerbose);
             p.Controls.Add(MkHint("注意：配置保存在 %LOCALAPPDATA%\\RightMenuGlass\\config.json，修改后下一次弹出菜单立即生效，无需重启。", 20, 78, 760, 22));
 
-            GroupBox g1 = MkGroup("文件", 20, 112, 770, 96);
+            GroupBox g1 = MkGroup("文件", 20, 112, 770, 108);
             g1.Controls.Add(MkBtn("打开配置目录", 16, 26, 130, delegate (object s, EventArgs e) { OpenDir(cfgDir); }));
             g1.Controls.Add(MkBtn("打开日志文件", 156, 26, 130, delegate (object s, EventArgs e) {
                 string log = Path.Combine(cfgDir, "dll.log");
@@ -253,9 +322,12 @@ namespace RmgCfg {
                 else MessageBox.Show("还没有日志文件，先用右键菜单弹出一次。", "RightMenuGlass");
             }));
             g1.Controls.Add(MkBtn("打开程序目录", 296, 26, 130, delegate (object s, EventArgs e) { OpenDir(appDir); }));
+            g1.Controls.Add(MkBtn("导出设置…", 440, 26, 120, delegate (object s, EventArgs e) { ExportSettings(); }));
+            g1.Controls.Add(MkBtn("导入设置…", 572, 26, 120, delegate (object s, EventArgs e) { ImportSettings(); }));
+            g1.Controls.Add(MkHint("导出/导入只处理 config.json 这一份设置，插件和菜单记录不包含在内。", 16, 64, 730, 22));
             p.Controls.Add(g1);
 
-            GroupBox g2 = MkGroup("插件", 20, 220, 770, 96);
+            GroupBox g2 = MkGroup("插件", 20, 232, 770, 96);
             g2.Controls.Add(MkBtn("打开插件目录", 16, 26, 130, delegate (object s, EventArgs e) {
                 string dir = Path.Combine(cfgDir, "plugins");
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
@@ -270,7 +342,7 @@ namespace RmgCfg {
             g2.Controls.Add(MkHint("插件是 UTF-8 编码的 .json 文件，放在插件目录里即可，格式见文档。", 16, 62, 730, 22));
             p.Controls.Add(g2);
 
-            GroupBox g3 = MkGroup("应用到资源管理器", 20, 328, 770, 130);
+            GroupBox g3 = MkGroup("应用到资源管理器", 20, 340, 770, 130);
             g3.Controls.Add(MkBtn("仅重新注入 DLL", 16, 26, 140, delegate (object s, EventArgs e) { RunCtl("inject", true); }));
             g3.Controls.Add(MkBtn("重启资源管理器并注入", 166, 26, 170, delegate (object s, EventArgs e) {
                 if (MessageBox.Show("会关闭所有文件夹窗口（不会丢失已保存的文件），桌面会闪烁一下。继续？", "RightMenuGlass", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
@@ -286,7 +358,7 @@ namespace RmgCfg {
         TabPage BuildAppearanceTab() {
             TabPage p = NewTab("外观");
 
-            GroupBox g = MkGroup("亚克力 / 毛玻璃", 20, 16, 770, 420);
+            GroupBox g = MkGroup("亚克力 / 毛玻璃", 20, 16, 770, 448);
 
             chkAcrylic = MkCheck("启用亚克力模糊背景", 16, 28, 300);
 
@@ -330,18 +402,303 @@ namespace RmgCfg {
             numMargin = MkNum(110, 318, 0, 40, 10, 70);
             g.Controls.Add(numMargin);
 
-            g.Controls.Add(MkHint("所有尺寸都会按当前显示器的 DPI 自动缩放。", 16, 360, 730, 22));
+            g.Controls.Add(MkLabel("展开方向", 16, 356, 90));
+            cboOpenDir = new ComboBox();
+            cboOpenDir.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboOpenDir.Bounds = new Rectangle(110, 354, 152, 24);
+            cboOpenDir.Items.AddRange(new object[] {
+                "右下（默认）", "右上", "左下", "左上", "自动（朝屏幕中央）"
+            });
+            g.Controls.Add(cboOpenDir);
+            g.Controls.Add(MkHint("菜单从指针的哪一侧展开；放不下时自动翻到另一侧。", 276, 358, 470, 22));
+            g.Controls.Add(MkHint("选「自动」时按指针所在的半屏朝屏幕中央展开。", 110, 382, 660, 22));
+
+            g.Controls.Add(MkHint("所有尺寸都会按当前显示器的 DPI 自动缩放。", 16, 410, 730, 22));
 
             p.Controls.Add(g);
+            return p;
+        }
+
+        // ---------------- animation tab ----------------
+        bool loadGuard;
+
+        NumericUpDown MkNumDec(int x, int y, decimal min, decimal max, decimal val, decimal step, int w) {
+            NumericUpDown n = new NumericUpDown();
+            n.DecimalPlaces = 2;
+            n.Increment = step;
+            n.Minimum = min;
+            n.Maximum = max;
+            n.Value = Math.Max(min, Math.Min(max, val));
+            n.Bounds = new Rectangle(x, y, w, 24);
+            n.ValueChanged += delegate (object s, EventArgs e) { if (!loadGuard) { animProgress = 1.0; animPreview.Invalidate(); } };
+            return n;
+        }
+
+        static double BzAxis(double t, double p1, double p2) {
+            double mt = 1 - t;
+            return 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t;
+        }
+
+        // y for a given x on cubic-bezier(x1,y1,x2,y2) with endpoints (0,0)/(1,1).
+        static double BzEase(double x, double x1, double y1, double x2, double y2) {
+            if (x <= 0) return 0;
+            if (x >= 1) return 1;
+            double lo = 0, hi = 1, t = x;
+            for (int i = 0; i < 32; i++) {
+                double cx = BzAxis(t, x1, x2);
+                if (cx < x) lo = t; else hi = t;
+                t = (lo + hi) / 2;
+            }
+            return BzAxis(t, y1, y2);
+        }
+
+        // 取色粒度：0 逐像素 / 1 按字 / 2 整项
+        static int UnitToIndex(string u) {
+            if (u == "glyph") return 1;
+            if (u == "item") return 2;
+            return 0;
+        }
+
+        static string IndexToUnit(int i) {
+            if (i == 1) return "glyph";
+            if (i == 2) return "item";
+            return "pixel";
+        }
+
+        static int ModeToIndex(string mode) {
+            if (mode == null) return 2;
+            string m = mode.Trim().ToLower();
+            if (m == "none") return 0;
+            if (m == "fast") return 1;
+            if (m == "elegant") return 3;
+            if (m == "custom") return 4;
+            return 2;
+        }
+
+        static string IndexToMode(int idx) {
+            if (idx == 0) return "none";
+            if (idx == 1) return "fast";
+            if (idx == 3) return "elegant";
+            if (idx == 4) return "custom";
+            return "smooth";
+        }
+
+        void ApplyAnimPreset(int idx) {
+            if (idx == 0) {
+                numAnimDur.Value = 0;
+            } else if (idx == 1) {
+                numAnimDur.Value = 120;
+                numAnimOpacity.Value = 0;
+                numAnimScale.Value = 98;
+                numAnimOffset.Value = 4;
+                numBz1.Value = 0.20m; numBz2.Value = 0.90m;
+                numBz3.Value = 0.30m; numBz4.Value = 1.00m;
+            } else if (idx == 2) {
+                numAnimDur.Value = 220;
+                numAnimOpacity.Value = 0;
+                numAnimScale.Value = 96;
+                numAnimOffset.Value = 8;
+                numBz1.Value = 0.16m; numBz2.Value = 0.84m;
+                numBz3.Value = 0.44m; numBz4.Value = 1.00m;
+            } else if (idx == 3) {
+                numAnimDur.Value = 420;
+                numAnimOpacity.Value = 0;
+                numAnimScale.Value = 93;
+                numAnimOffset.Value = 12;
+                numBz1.Value = 0.22m; numBz2.Value = 1.00m;
+                numBz3.Value = 0.36m; numBz4.Value = 1.00m;
+            }
+        }
+
+        void UpdateAnimEnabledState() {
+            int idx = cboAnimMode.SelectedIndex;
+            bool custom = idx == 4;
+            bool on = chkAnim.Checked && idx != 0;
+            numAnimDur.Enabled = custom && on;
+            numAnimOpacity.Enabled = custom && on;
+            numAnimScale.Enabled = custom && on;
+            numAnimOffset.Enabled = custom && on;
+            numBz1.Enabled = custom && on;
+            numBz2.Enabled = custom && on;
+            numBz3.Enabled = custom && on;
+            numBz4.Enabled = custom && on;
+            animPreview.Enabled = on;
+        }
+
+        void OnAnimModeChanged() {
+            if (loadGuard) return;
+            ApplyAnimPreset(cboAnimMode.SelectedIndex);
+            UpdateAnimEnabledState();
+            PlayAnimPreview();
+        }
+
+        void PlayAnimPreview() {
+            if (animTimer != null) { animTimer.Stop(); animTimer.Dispose(); animTimer = null; }
+            animProgress = 0.0;
+            animPreview.Invalidate();
+            if (cboAnimMode.SelectedIndex == 0 && !chkAnim.Checked) { animProgress = 1.0; animPreview.Invalidate(); return; }
+            animTimer = new Timer();
+            animTimer.Interval = 15;
+            long started = Environment.TickCount;
+            int dur = (int)numAnimDur.Value;
+            if (dur <= 0) { animProgress = 1.0; animPreview.Invalidate(); animTimer.Dispose(); animTimer = null; return; }
+            animTimer.Tick += delegate (object s, EventArgs e) {
+                double t = (double)(Environment.TickCount - started) / (double)dur;
+                if (t >= 1.0) {
+                    animProgress = 1.0;
+                    animPreview.Invalidate();
+                    animTimer.Stop();
+                } else {
+                    animProgress = t;
+                    animPreview.Invalidate();
+                }
+            };
+            animTimer.Start();
+        }
+
+        void AnimPreviewPaint(object sender, PaintEventArgs e) {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle area = animPreview.ClientRectangle;
+            g.Clear(Color.FromArgb(24, 24, 28));
+
+            double x1 = (double)numBz1.Value, y1 = (double)numBz2.Value;
+            double x2 = (double)numBz3.Value, y2 = (double)numBz4.Value;
+
+            // 左：曲线图
+            Rectangle plot = new Rectangle(14, 14, 180, 152);
+            using (Pen grid = new Pen(Color.FromArgb(60, 60, 68))) {
+                for (int i = 0; i <= 4; i++) {
+                    int gx = plot.Left + plot.Width * i / 4;
+                    int gy = plot.Top + plot.Height * i / 4;
+                    g.DrawLine(grid, gx, plot.Top, gx, plot.Bottom);
+                    g.DrawLine(grid, plot.Left, gy, plot.Right, gy);
+                }
+            }
+            PointF[] pts = new PointF[61];
+            for (int i = 0; i <= 60; i++) {
+                double tx = i / 60.0;
+                double ty = BzEase(tx, x1, y1, x2, y2);
+                pts[i] = new PointF((float)(plot.Left + tx * plot.Width),
+                                    (float)(plot.Bottom - ty * plot.Height));
+            }
+            using (Pen curve = new Pen(Color.FromArgb(120, 190, 255), 2f)) g.DrawLines(curve, pts);
+            using (Brush cap = new SolidBrush(Color.FromArgb(120, 190, 255))) {
+                double cy = BzEase(animProgress, x1, y1, x2, y2);
+                g.FillEllipse(cap, (float)(plot.Left + animProgress * plot.Width) - 3,
+                                   (float)(plot.Bottom - cy * plot.Height) - 3, 6, 6);
+            }
+
+            // 右：按参数画一张菜单卡片
+            double ease = BzEase(animProgress, x1, y1, x2, y2);
+            int a0 = (int)numAnimOpacity.Value;
+            int s0 = (int)numAnimScale.Value;
+            int dy0 = (int)numAnimOffset.Value;
+            int alpha = (int)Math.Round(a0 + (100 - a0) * ease);
+            double scale = (s0 + (100 - s0) * ease) / 100.0;
+            int offY = (int)Math.Round(dy0 * (1 - ease));
+
+            Rectangle card = new Rectangle(area.Width - 250, 20, 210, 140);
+            int cw = (int)(card.Width * scale);
+            int ch = (int)(card.Height * scale);
+            Rectangle shown = new Rectangle(card.Left + (card.Width - cw) / 2,
+                                            card.Top + (card.Height - ch) / 2 + offY, cw, ch);
+            int shade = 230;
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(alpha * shade / 100, 246, 246, 248)))
+                g.FillRectangle(b, shown);
+            using (Pen edge = new Pen(Color.FromArgb(alpha * 60 / 100, 255, 255, 255)))
+                g.DrawRectangle(edge, shown);
+            int textAlpha = alpha;
+            using (SolidBrush tb = new SolidBrush(Color.FromArgb(textAlpha, 20, 20, 24))) {
+                int rows = 4;
+                for (int i = 0; i < rows; i++) {
+                    int ty = shown.Top + 16 + i * ((shown.Height - 24) / rows);
+                    if (ty + 8 > shown.Bottom) break;
+                    g.FillRectangle(tb, shown.Left + 14, ty, Math.Max(10, shown.Width - 60), 8);
+                }
+            }
+        }
+
+        TabPage BuildAnimationTab() {
+            TabPage p = NewTab("动画");
+
+            chkAnim = MkCheck("启用呼出动画（淡入 + 轻微放大）", 20, 18, 460);
+            chkAnim.CheckedChanged += delegate (object s, EventArgs e) { if (loadGuard) return; UpdateAnimEnabledState(); PlayAnimPreview(); };
+            p.Controls.Add(chkAnim);
+
+            p.Controls.Add(MkLabel("预设", 20, 52, 40));
+            cboAnimMode = new ComboBox();
+            cboAnimMode.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboAnimMode.Items.AddRange(new object[] { "无", "快速", "平滑", "优雅", "自定义" });
+            cboAnimMode.Bounds = new Rectangle(66, 50, 120, 24);
+            cboAnimMode.SelectedIndexChanged += delegate (object s, EventArgs e) { OnAnimModeChanged(); };
+            p.Controls.Add(cboAnimMode);
+            p.Controls.Add(MkHint("快速 / 平滑 / 优雅 由快到慢，都会套用一组推荐参数并把下面的数值锁定；想自己调曲线就选「自定义」。", 200, 52, 580, 22));
+
+            GroupBox g1 = MkGroup("时长与幅度", 20, 84, 380, 176);
+            g1.Controls.Add(MkLabel("时长（毫秒）", 16, 26, 120));
+            numAnimDur = MkNum(140, 26, 0, 1500, 220, 70);
+            numAnimDur.ValueChanged += delegate (object s, EventArgs e) { if (!loadGuard) { animProgress = 1.0; animPreview.Invalidate(); } };
+            g1.Controls.Add(numAnimDur);
+            g1.Controls.Add(MkLabel("起始不透明度", 16, 60, 120));
+            numAnimOpacity = MkNum(140, 60, 0, 100, 0, 70);
+            numAnimOpacity.ValueChanged += delegate (object s, EventArgs e) { if (!loadGuard) { animProgress = 1.0; animPreview.Invalidate(); } };
+            g1.Controls.Add(numAnimOpacity);
+            g1.Controls.Add(MkLabel("起始缩放（%）", 16, 94, 120));
+            numAnimScale = MkNum(140, 94, 60, 100, 96, 70);
+            numAnimScale.ValueChanged += delegate (object s, EventArgs e) { if (!loadGuard) { animProgress = 1.0; animPreview.Invalidate(); } };
+            g1.Controls.Add(numAnimScale);
+            g1.Controls.Add(MkLabel("起始下移（像素）", 16, 128, 120));
+            numAnimOffset = MkNum(140, 128, 0, 64, 8, 70);
+            numAnimOffset.ValueChanged += delegate (object s, EventArgs e) { if (!loadGuard) { animProgress = 1.0; animPreview.Invalidate(); } };
+            g1.Controls.Add(numAnimOffset);
+            p.Controls.Add(g1);
+
+            GroupBox g2 = MkGroup("曲线（三次贝塞尔：x 是时间，y 是进度）", 412, 84, 378, 176);
+            g2.Controls.Add(MkLabel("x1", 16, 26, 30));
+            numBz1 = MkNumDec(50, 26, 0, 1, 0.16m, 0.01m, 60);
+            g2.Controls.Add(numBz1);
+            g2.Controls.Add(MkLabel("y1", 126, 26, 30));
+            numBz2 = MkNumDec(160, 26, 0, 1, 0.84m, 0.01m, 60);
+            g2.Controls.Add(numBz2);
+            g2.Controls.Add(MkLabel("x2", 16, 66, 30));
+            numBz3 = MkNumDec(50, 66, 0, 1, 0.44m, 0.01m, 60);
+            g2.Controls.Add(numBz3);
+            g2.Controls.Add(MkLabel("y2", 126, 66, 30));
+            numBz4 = MkNumDec(160, 66, 0, 1, 1.00m, 0.01m, 60);
+            g2.Controls.Add(numBz4);
+            g2.Controls.Add(MkHint("x 越大前段越慢，y 决定冲进度的快慢。平滑曲线常用 0.16/0.84/0.44/1。", 16, 108, 344, 44));
+            p.Controls.Add(g2);
+
+            GroupBox g3 = MkGroup("预览", 20, 268, 770, 254);
+            animPreview = new Panel();
+            animPreview.Bounds = new Rectangle(14, 24, 740, 180);
+            animPreview.BackColor = Color.FromArgb(24, 24, 28);
+            animPreview.BorderStyle = BorderStyle.FixedSingle;
+            animPreview.Paint += AnimPreviewPaint;
+            g3.Controls.Add(animPreview);
+            g3.Controls.Add(MkBtn("试播", 14, 212, 90, delegate (object s, EventArgs e) { PlayAnimPreview(); }));
+            g3.Controls.Add(MkHint("左边是曲线形状（圆点表示当前时刻），右边是按上面的参数画出来的菜单卡片。", 116, 216, 640, 22));
+            p.Controls.Add(g3);
+
             return p;
         }
 
         TabPage BuildTextTab() {
             TabPage p = NewTab("文字");
 
-            GroupBox g1 = MkGroup("文字颜色（按背景亮度逐像素取色）", 20, 12, 770, 206);
+            GroupBox g1 = MkGroup("文字颜色（按背景亮度逐像素取色）", 20, 12, 770, 232);
             chkColors = MkCheck("启用智能文字颜色", 16, 26, 300);
-            chkPerPixel = MkCheck("逐像素判断（同一个字的笔画可以是不同颜色）", 16, 52, 460);
+            // 取色粒度：逐像素 / 每个字 / 整个菜单项
+            g1.Controls.Add(MkLabel("取色粒度", 16, 56, 76));
+            cboColorUnit = new ComboBox();
+            cboColorUnit.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboColorUnit.Bounds = new Rectangle(100, 54, 210, 24);
+            cboColorUnit.Items.AddRange(new object[] {
+                "逐像素（同一个字可以多种颜色）", "按字取色（每个字一种颜色）", "整项同色（一行只用一个颜色）"
+            });
+            g1.Controls.Add(cboColorUnit);
+            g1.Controls.Add(MkHint("按字取色时一行里不同字可以是不同颜色；整项同色最统一。", 320, 56, 440, 22));
 
             g1.Controls.Add(MkLabel("浅背景用", 16, 86, 80));
             swDark = new ColorSwatch();
@@ -377,12 +734,12 @@ namespace RmgCfg {
             g1.Controls.Add(numHaloA);
 
             g1.Controls.Add(MkHint("亮度分界 0-255：背景亮于此值用「深背景用」色，备用色留空则不用。", 16, 154, 730, 20));
-            g1.Controls.Add(MkHint("过渡宽度默认 6 像素（0 = 硬切换）；描边给文字加一圈反色光晕，背景越花越有用。", 16, 176, 730, 20));
+            g1.Controls.Add(MkHint("过渡宽度默认 2（0 = 硬切换），颜色实际横跨约两倍像素，填得太小会自动按最小值处理；描边给文字加一圈反色光晕。", 16, 176, 730, 20));
+            g1.Controls.Add(MkHint("取消勾选「智能文字颜色」后所有文字固定用「浅背景用」那一格的颜色，不再参考背景。", 16, 198, 730, 20));
 
             g1.Controls.Add(chkColors);
-            g1.Controls.Add(chkPerPixel);
 
-            GroupBox g2 = MkGroup("字体与尺寸", 20, 226, 770, 300);
+            GroupBox g2 = MkGroup("字体与尺寸", 20, 252, 770, 300);
             g2.Controls.Add(MkLabel("字体", 16, 28, 60));
             cboFont = new ComboBox();
             cboFont.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -419,6 +776,10 @@ namespace RmgCfg {
             g2.Controls.Add(MkLabel("最大高", 340, 154, 60));
             numMaxH = MkNum(400, 154, 200, 2000, 720, 70);
             g2.Controls.Add(numMaxH);
+            g2.Controls.Add(MkLabel("顶栏高", 520, 154, 70));
+            numHeaderH = MkNum(596, 154, 18, 120, 32, 70);
+            numHeaderH.Enabled = true;
+            g2.Controls.Add(numHeaderH);
 
             chkShowShortcut = MkCheck("显示快捷键提示", 16, 190, 200);
             chkShowCheckmarks = MkCheck("显示勾选标记", 220, 190, 180);
@@ -437,6 +798,8 @@ namespace RmgCfg {
             g2.Controls.Add(previewPanel);
 
             EventHandler refresh = delegate { previewPanel.Invalidate(); };
+            chkColors.CheckedChanged += refresh;
+            cboColorUnit.SelectedIndexChanged += refresh;
             numThreshold.ValueChanged += refresh;
             numSoftness.ValueChanged += refresh;
             numHaloW.ValueChanged += refresh;
@@ -462,11 +825,15 @@ namespace RmgCfg {
             if (w < 8 || h < 8) return;
 
             int split = w / 2;
+            bool smart = chkColors.Checked;         // 关闭后整串一个固定色，完全不看背景
+            int unit = cboColorUnit.SelectedIndex < 0 ? 0 : cboColorUnit.SelectedIndex; // 0 像素 1 字 2 项
             int soft = (int)numSoftness.Value;
-            // 过渡带总宽度就是 soft 像素（DLL 里平均窗口半径取一半，正好铺满这条带）。
-            int band = soft > 0 ? Math.Max(2, soft) : 0;
+            // DLL 里局部平均窗口的半径取 soft，颜色实际横跨约 2*soft 像素，这里保持一致。
+            int band = (smart && unit == 0 && soft > 0) ? Math.Max(4, soft * 2) : 0;
             int threshold = (int)numThreshold.Value;
             const int lumMax = 245, lumMin = 28;   // 与下面画出来的背景两端一致
+            Color darkC = ColorSwatch.FromHex(swDark.Hex, Color.Black);
+            Color lightC = ColorSwatch.FromHex(swLight.Hex, Color.White);
 
             using (Bitmap canvas = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
                 using (Graphics cg = Graphics.FromImage(canvas)) {
@@ -489,6 +856,8 @@ namespace RmgCfg {
 
                 string sample = "复制  剪切  粘贴  删除";
                 Rectangle rr = new Rectangle(0, 0, w, h);
+                int[] chEdge = new int[sample.Length + 1];   // 每个字符的右边界，供“按字取色”预览用
+                int[] chLum = new int[sample.Length];
                 using (Bitmap mask = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
                     using (Graphics mg = Graphics.FromImage(mask)) {
                         mg.Clear(Color.Transparent);
@@ -498,6 +867,9 @@ namespace RmgCfg {
                             sf.LineAlignment = StringAlignment.Center;
                             using (SolidBrush b = new SolidBrush(Color.White))
                                 mg.DrawString(sample, f, b, new RectangleF(6, 0, w - 12, h), sf);
+                            chEdge[0] = 6;
+                            for (int ci = 0; ci < sample.Length; ++ci)
+                                chEdge[ci + 1] = 6 + (int)Math.Round(mg.MeasureString(sample.Substring(0, ci + 1), f).Width);
                         }
                     }
 
@@ -508,10 +880,27 @@ namespace RmgCfg {
                         int[] mb = new int[w * h];
                         Marshal.Copy(cd.Scan0, cb, 0, cb.Length);
                         Marshal.Copy(md.Scan0, mb, 0, mb.Length);
+                        if (unit == 1) {
+                            // 每个字符所在列块的平均背景亮度：同一像素属于哪个字，就按那个字的亮度取色
+                            for (int ci = 0; ci < sample.Length; ++ci) {
+                                int x0 = Math.Max(0, chEdge[ci]), x1 = Math.Min(w, chEdge[ci + 1]);
+                                long sum = 0;
+                                int n = 0;
+                                for (int y2 = 0; y2 < h; y2 += 2)
+                                    for (int x2 = x0; x2 < x1; x2 += 2) {
+                                        int c0 = cb[y2 * w + x2];
+                                        int r0 = c0 & 0xFF, g0 = (c0 >> 8) & 0xFF, b0 = (c0 >> 16) & 0xFF;
+                                        sum += (r0 * 299 + g0 * 587 + b0 * 114) / 1000;
+                                        ++n;
+                                    }
+                                chLum[ci] = n > 0 ? (int)(sum / n) : -1;
+                            }
+                        }
                         // 先铺描边光晕：只在文字蒙版为 0 的像素上，取邻域最大覆盖度，
                         // 用与文字相反的一侧颜色（暗底加亮边、亮底加暗边）混一层，提升可读性。
                         int hw = (int)numHaloW.Value;
                         int ha = (int)numHaloA.Value;
+                        if (!smart) ha = 0;   // 固定色模式下没有“反色”可言，描边只会加粗
                         if (hw > 0 && ha > 0) {
                             for (int y = 0; y < h; ++y) {
                                 for (int x = 0; x < w; ++x) {
@@ -531,11 +920,14 @@ namespace RmgCfg {
                                     int c = cb[i];
                                     int br = c & 0xFF, bg2 = (c >> 8) & 0xFF, bb = (c >> 16) & 0xFF;
                                     int lum = (br * 299 + bg2 * 587 + bb * 114) / 1000;
-                                    int halo = lum < threshold ? 255 : 0;
+                                    bool useDark = lum >= threshold;
+                                    int hr = useDark ? darkC.R : lightC.R;
+                                    int hg = useDark ? darkC.G : lightC.G;
+                                    int hb = useDark ? darkC.B : lightC.B;
                                     int aa2 = best * ha / 100;
-                                    int nr = (br * (255 - aa2) + halo * aa2) / 255;
-                                    int ng = (bg2 * (255 - aa2) + halo * aa2) / 255;
-                                    int nb = (bb * (255 - aa2) + halo * aa2) / 255;
+                                    int nr = (br * (255 - aa2) + hr * aa2) / 255;
+                                    int ng = (bg2 * (255 - aa2) + hg * aa2) / 255;
+                                    int nb = (bb * (255 - aa2) + hb * aa2) / 255;
                                     cb[i] = (c & unchecked((int)0xFF000000)) | (nb << 16) | (ng << 8) | nr;
                                 }
                             }
@@ -547,23 +939,48 @@ namespace RmgCfg {
                             int c = cb[i];
                             int br = c & 0xFF, bg2 = (c >> 8) & 0xFF, bb = (c >> 16) & 0xFF;
                             int lum = (br * 299 + bg2 * 587 + bb * 114) / 1000;
-                            double t;
-                            int spanUp = lumMax - threshold, spanDown = threshold - lumMin;
-                            if (soft <= 0 || spanUp <= 0 || spanDown <= 0) {
-                                t = lum > threshold ? 1.0 : 0.0;
+                            int nr, ng, nb;
+                            if (!smart) {
+                                // 关闭智能文字颜色：整串固定用“浅背景用”那一格的颜色
+                                nr = darkC.R; ng = darkC.G; nb = darkC.B;
                             } else {
-                                // 两侧分别按实测亮度端点归一化：最亮处纯黑、最暗处纯白，
-                                // 中间按 smoothstep 平滑过渡（与 DLL 中的规则一致）。
-                                if (lum >= threshold) t = 0.5 + 0.5 * (lum - threshold) / (double)spanUp;
-                                else t = 0.5 - 0.5 * (threshold - lum) / (double)spanDown;
-                                if (t < 0) t = 0; else if (t > 1) t = 1;
-                                t = t * t * (3 - 2 * t);
+                                double t;
+                                if (unit != 0) {
+                                    // 按字 / 整项：先算这个单元的平均亮度，再整体做一次硬切换
+                                    int eff = lum;
+                                    if (unit == 2) {
+                                        eff = (lumMax + lumMin) / 2;
+                                    } else {
+                                        int px0 = i % w;
+                                        int ci = sample.Length - 1;
+                                        for (int k = 0; k < sample.Length; ++k)
+                                            if (px0 >= chEdge[k] && px0 < chEdge[k + 1]) { ci = k; break; }
+                                        if (chLum[ci] >= 0) eff = chLum[ci];
+                                    }
+                                    t = eff > threshold ? 1.0 : 0.0;
+                                } else if (soft <= 0) {
+                                    t = lum > threshold ? 1.0 : 0.0;
+                                } else {
+                                    int spanUp = lumMax - threshold, spanDown = threshold - lumMin;
+                                    if (spanUp <= 0 || spanDown <= 0) {
+                                        t = lum > threshold ? 1.0 : 0.0;
+                                    } else {
+                                        // 两侧分别按实测亮度端点归一化：最亮处纯深色、最暗处纯浅色，
+                                        // 中间按 smoothstep 平滑过渡（与 DLL 中的规则一致）。
+                                        if (lum >= threshold) t = 0.5 + 0.5 * (lum - threshold) / (double)spanUp;
+                                        else t = 0.5 - 0.5 * (threshold - lum) / (double)spanDown;
+                                        if (t < 0) t = 0; else if (t > 1) t = 1;
+                                        t = t * t * (3 - 2 * t);
+                                    }
+                                }
+                                nr = (int)(lightC.R + (darkC.R - lightC.R) * t);
+                                ng = (int)(lightC.G + (darkC.G - lightC.G) * t);
+                                nb = (int)(lightC.B + (darkC.B - lightC.B) * t);
                             }
-                            int fg = (int)(255 * (1.0 - t));     // 亮背景 -> 近黑，暗背景 -> 近白
-                            int nr = (br * (255 - a) + fg * a) / 255;
-                            int ng = (bg2 * (255 - a) + fg * a) / 255;
-                            int nb = (bb * (255 - a) + fg * a) / 255;
-                            cb[i] = (a << 24) | (nb << 16) | (ng << 8) | nr;
+                            int or1 = (br * (255 - a) + nr * a) / 255;
+                            int og1 = (bg2 * (255 - a) + ng * a) / 255;
+                            int ob1 = (bb * (255 - a) + nb * a) / 255;
+                            cb[i] = (a << 24) | (ob1 << 16) | (og1 << 8) | or1;
                         }
                         Marshal.Copy(cb, 0, cd.Scan0, cb.Length);
                     } finally {
@@ -871,15 +1288,36 @@ namespace RmgCfg {
 
             JVal co = Json.Obj(root, "colors");
             chkColors.Checked = Json.GetBool(co, "enabled", true);
-            chkPerPixel.Checked = Json.GetBool(co, "perPixel", true);
+            string selUnit = Json.GetStr(co, "colorUnit", Json.GetBool(co, "perPixel", true) ? "pixel" : "item");
+            cboColorUnit.SelectedIndex = UnitToIndex(selUnit);
             swDark.Hex = Json.GetStr(co, "darkText", "#000000");
             swLight.Hex = Json.GetStr(co, "lightText", "#FFFFFF");
             numThreshold.Value = Clamp(Json.GetInt(co, "threshold", 140), numThreshold.Minimum, numThreshold.Maximum);
-            numSoftness.Value = Clamp(Json.GetInt(co, "softness", 6), numSoftness.Minimum, numSoftness.Maximum);
+            numSoftness.Value = Clamp(Json.GetInt(co, "softness", 2), numSoftness.Minimum, numSoftness.Maximum);
             numHaloW.Value = Clamp(Json.GetInt(co, "haloWidth", 1), numHaloW.Minimum, numHaloW.Maximum);
             numHaloA.Value = Clamp(Json.GetInt(co, "haloAlpha", 40), numHaloA.Minimum, numHaloA.Maximum);
             swExtraDark.Hex = Json.GetStr(co, "extraDark", "#000000");
             swExtraLight.Hex = Json.GetStr(co, "extraLight", "#FFFFFF");
+
+            JVal an = Json.Obj(root, "animation");
+            loadGuard = true;
+            chkAnim.Checked = Json.GetBool(an, "enabled", true);
+            cboAnimMode.SelectedIndex = ModeToIndex(Json.GetStr(an, "mode", "elegant"));
+            numAnimDur.Value = Clamp(Json.GetInt(an, "durationMs", 420), numAnimDur.Minimum, numAnimDur.Maximum);
+            numAnimOpacity.Value = Clamp(Json.GetInt(an, "fromOpacity", 0), numAnimOpacity.Minimum, numAnimOpacity.Maximum);
+            numAnimScale.Value = Clamp(Json.GetInt(an, "fromScale", 93), numAnimScale.Minimum, numAnimScale.Maximum);
+            numAnimOffset.Value = Clamp(Json.GetInt(an, "fromOffsetY", 12), numAnimOffset.Minimum, numAnimOffset.Maximum);
+            double[] cvs = new double[] { 0.22, 1.0, 0.36, 1.0 };
+            JVal cu = Json.Get(an, "curve");
+            if (cu != null && cu.T == JVal.TArr && cu.A.Count >= 4) {
+                for (int i = 0; i < 4; i++) cvs[i] = cu.A[i].N;
+            }
+            numBz1.Value = ClampDouble(cvs[0], numBz1.Minimum, numBz1.Maximum);
+            numBz2.Value = ClampDouble(cvs[1], numBz2.Minimum, numBz2.Maximum);
+            numBz3.Value = ClampDouble(cvs[2], numBz3.Minimum, numBz3.Maximum);
+            numBz4.Value = ClampDouble(cvs[3], numBz4.Minimum, numBz4.Maximum);
+            loadGuard = false;
+            UpdateAnimEnabledState();
 
             JVal st = Json.Obj(root, "style");
             string family = Json.GetStr(st, "fontFamily", "Microsoft YaHei UI");
@@ -895,12 +1333,14 @@ namespace RmgCfg {
             numFontSize.Value = Clamp(Json.GetInt(st, "fontSize", 9), numFontSize.Minimum, numFontSize.Maximum);
             numItemHeight.Value = Clamp(Json.GetInt(st, "itemHeight", 32), numItemHeight.Minimum, numItemHeight.Maximum);
             numIconSize.Value = Clamp(Json.GetInt(st, "iconSize", 16), numIconSize.Minimum, numIconSize.Maximum);
+            numHeaderH.Value = Clamp(Json.GetInt(st, "headerHeight", 32), numHeaderH.Minimum, numHeaderH.Maximum);
             numMinW.Value = Clamp(Json.GetInt(st, "minWidth", 180), numMinW.Minimum, numMinW.Maximum);
             numMaxW.Value = Clamp(Json.GetInt(st, "maxWidth", 520), numMaxW.Minimum, numMaxW.Maximum);
             numMaxH.Value = Clamp(Json.GetInt(st, "maxHeight", 720), numMaxH.Minimum, numMaxH.Maximum);
             chkShowShortcut.Checked = Json.GetBool(st, "showShortcut", true);
             chkShowCheckmarks.Checked = Json.GetBool(st, "showCheckmarks", true);
             numHoverDelay.Value = Clamp(Json.GetInt(st, "hoverDelayMs", 320), numHoverDelay.Minimum, numHoverDelay.Maximum);
+            cboOpenDir.SelectedIndex = DirToIndex(Json.GetStr(st, "openDirection", "right-down"));
 
             JVal tp = Json.Obj(root, "thirdParty");
             chkThird.Checked = Json.GetBool(tp, "enabled", true);
@@ -949,6 +1389,31 @@ namespace RmgCfg {
             return v;
         }
 
+        static decimal ClampDouble(double v, decimal min, decimal max) {
+            decimal d = (decimal)v;
+            if (d < min) return min;
+            if (d > max) return max;
+            return d;
+        }
+
+        static int DirToIndex(string d) {
+            if (d == "right-up") return 1;
+            if (d == "left-down") return 2;
+            if (d == "left-up") return 3;
+            if (d == "auto") return 4;
+            return 0;
+        }
+
+        static string IndexToDir(int i) {
+            switch (i) {
+                case 1: return "right-up";
+                case 2: return "left-down";
+                case 3: return "left-up";
+                case 4: return "auto";
+            }
+            return "right-down";
+        }
+
         void CollectFromUi() {
             Json.Set(root, "enabled", JVal.NewBool(chkEnabled.Checked));
             Json.Set(root, "logVerbose", JVal.NewBool(chkLogVerbose.Checked));
@@ -967,7 +1432,9 @@ namespace RmgCfg {
 
             JVal co = Json.Obj(root, "colors");
             Json.Set(co, "enabled", JVal.NewBool(chkColors.Checked));
-            Json.Set(co, "perPixel", JVal.NewBool(chkPerPixel.Checked));
+            Json.Set(co, "colorUnit", JVal.NewStr(IndexToUnit(cboColorUnit.SelectedIndex < 0 ? 0 : cboColorUnit.SelectedIndex)));
+            // 旧版本只认 perPixel：只在“整项同色”时为 false，保证旧版本读到接近的语义
+            Json.Set(co, "perPixel", JVal.NewBool(cboColorUnit.SelectedIndex <= 0));
             Json.Set(co, "darkText", JVal.NewStr(swDark.Hex));
             Json.Set(co, "lightText", JVal.NewStr(swLight.Hex));
             Json.Set(co, "threshold", JVal.NewInt((int)numThreshold.Value));
@@ -977,6 +1444,20 @@ namespace RmgCfg {
             Json.Set(co, "extraDark", JVal.NewStr(swExtraDark.Hex == "#000000" ? "" : swExtraDark.Hex));
             Json.Set(co, "extraLight", JVal.NewStr(swExtraLight.Hex == "#FFFFFF" ? "" : swExtraLight.Hex));
 
+            JVal an = Json.Obj(root, "animation");
+            Json.Set(an, "enabled", JVal.NewBool(chkAnim.Checked));
+            Json.Set(an, "mode", JVal.NewStr(IndexToMode(cboAnimMode.SelectedIndex)));
+            Json.Set(an, "durationMs", JVal.NewInt((int)numAnimDur.Value));
+            Json.Set(an, "fromOpacity", JVal.NewInt((int)numAnimOpacity.Value));
+            Json.Set(an, "fromScale", JVal.NewInt((int)numAnimScale.Value));
+            Json.Set(an, "fromOffsetY", JVal.NewInt((int)numAnimOffset.Value));
+            JVal curve = JVal.NewArr();
+            curve.A.Add(JVal.NewNum((double)numBz1.Value));
+            curve.A.Add(JVal.NewNum((double)numBz2.Value));
+            curve.A.Add(JVal.NewNum((double)numBz3.Value));
+            curve.A.Add(JVal.NewNum((double)numBz4.Value));
+            Json.Set(an, "curve", curve);
+
             JVal st = Json.Obj(root, "style");
             string fam = cboFont.SelectedItem as string;
             Json.Set(st, "fontFamily", JVal.NewStr(fam == null ? "Microsoft YaHei UI" : fam));
@@ -984,12 +1465,14 @@ namespace RmgCfg {
             Json.Set(st, "fontSize", JVal.NewInt((int)numFontSize.Value));
             Json.Set(st, "itemHeight", JVal.NewInt((int)numItemHeight.Value));
             Json.Set(st, "iconSize", JVal.NewInt((int)numIconSize.Value));
+            Json.Set(st, "headerHeight", JVal.NewInt((int)numHeaderH.Value));
             Json.Set(st, "minWidth", JVal.NewInt((int)numMinW.Value));
             Json.Set(st, "maxWidth", JVal.NewInt((int)numMaxW.Value));
             Json.Set(st, "maxHeight", JVal.NewInt((int)numMaxH.Value));
             Json.Set(st, "showShortcut", JVal.NewBool(chkShowShortcut.Checked));
             Json.Set(st, "showCheckmarks", JVal.NewBool(chkShowCheckmarks.Checked));
             Json.Set(st, "hoverDelayMs", JVal.NewInt((int)numHoverDelay.Value));
+            Json.Set(st, "openDirection", JVal.NewStr(IndexToDir(cboOpenDir.SelectedIndex)));
 
             JVal tp = Json.Obj(root, "thirdParty");
             Json.Set(tp, "enabled", JVal.NewBool(chkThird.Checked));

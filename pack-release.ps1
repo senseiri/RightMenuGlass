@@ -21,7 +21,19 @@ foreach ($f in $bins) {
     if (-not (Test-Path $p)) { throw "missing $p - run build.ps1 / build-host.ps1 / build-cfg.ps1 first" }
 }
 
-if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+if (-not (Test-Path $dist)) { New-Item -ItemType Directory -Force -Path $dist | Out-Null }
+# Only touch this version's own staging folder: dist itself may be held open by an
+# Explorer window, and removing it wholesale would fail for unrelated reasons.
+if (Test-Path $stage) {
+    try {
+        Remove-Item $stage -Recurse -Force -ErrorAction Stop
+    } catch {
+        Rename-Item $stage ($stage + '.old-' + (Get-Date -Format 'HHmmss'))
+    }
+}
+if (Test-Path $zip) {
+    try { Remove-Item $zip -Force -ErrorAction Stop } catch { Rename-Item $zip ($zip + '.old') }
+}
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 foreach ($f in $bins) { Copy-Item (Join-Path $bin $f) (Join-Path $stage $f) -Force }
