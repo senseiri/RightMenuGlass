@@ -9,6 +9,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace RmgCfg {
     public class MainForm : Form {
@@ -28,6 +29,7 @@ namespace RmgCfg {
 
         // 常规
         CheckBox chkEnabled, chkLogVerbose;
+        CheckBox chkAutostart, chkAutostartWatch;
 
         // 亚克力
         CheckBox chkAcrylic, chkAutoTint;
@@ -203,6 +205,7 @@ namespace RmgCfg {
                 if (!Directory.Exists(cfgDir)) Directory.CreateDirectory(cfgDir);
                 File.WriteAllText(cfgPath, Json.Stringify(root, true) + "\n", new UTF8Encoding(false));
                 statusLabel.Text = "已保存：" + ShownPath(cfgPath);
+                ApplyAutostartFromUi();
             } catch (Exception ex) {
                 MessageBox.Show("保存失败：\n" + ex.Message, "RightMenuGlass", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -342,14 +345,21 @@ namespace RmgCfg {
             g2.Controls.Add(MkHint("插件是 UTF-8 编码的 .json 文件，放在插件目录里即可，格式见文档。", 16, 62, 730, 22));
             p.Controls.Add(g2);
 
-            GroupBox g3 = MkGroup("应用到资源管理器", 20, 340, 770, 130);
+            GroupBox g3 = MkGroup("应用到资源管理器", 20, 334, 770, 212);
             g3.Controls.Add(MkBtn("仅重新注入 DLL", 16, 26, 140, delegate (object s, EventArgs e) { RunCtl("inject", true); }));
             g3.Controls.Add(MkBtn("重启资源管理器并注入", 166, 26, 170, delegate (object s, EventArgs e) {
                 if (MessageBox.Show("会关闭所有文件夹窗口（不会丢失已保存的文件），桌面会闪烁一下。继续？", "RightMenuGlass", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
                     RunCtl("restart", true);
             }));
             g3.Controls.Add(MkBtn("查看注入状态", 346, 26, 120, delegate (object s, EventArgs e) { RunCtl("status", false); }));
-            g3.Controls.Add(MkHint("第一次使用、或升级了 DLL 之后，需要点「重启资源管理器并注入」。日常修改配置不需要。", 16, 66, 730, 44));
+            g3.Controls.Add(MkHint("第一次使用、或升级了 DLL 之后，需要点「重启资源管理器并注入」。日常修改配置不需要。", 16, 66, 730, 40));
+
+            chkAutostart = MkCheck("开机自动注入（登录后注入一次就退出，不常驻）", 16, 110, 520);
+            chkAutostartWatch = MkCheck("常驻监视（explorer 重启后自动补注入，任务管理器里会多一个 rmgctl.exe）", 34, 136, 700);
+            g3.Controls.Add(chkAutostart);
+            g3.Controls.Add(chkAutostartWatch);
+            g3.Controls.Add(MkHint("取消勾选则开机不自动注入；之后右键菜单失效时，点上面的按钮手动注入一次即可。", 16, 164, 730, 40));
+            chkAutostart.CheckedChanged += delegate (object s, EventArgs e) { UpdateAutostartEnabled(); };
             p.Controls.Add(g3);
 
             return p;
@@ -1361,6 +1371,7 @@ namespace RmgCfg {
                     grid.Rows.Add(Json.GetBool(b, "enabled", true), Json.GetStr(b, "label", ""), Json.GetStr(b, "cmd", ""), IconToDisplay(Json.GetStr(b, "icon", "")));
                 }
             }
+            LoadAutostartIntoUi();
         }
 
         // Private-use glyphs are unreadable in a grid, so show their hex code instead.
@@ -1583,6 +1594,68 @@ namespace RmgCfg {
                     DrawToBitmap(bmp, new Rectangle(0, 0, Width, Height));
                     bmp.Save(Path.Combine(dir, "cfg_tab" + i.ToString() + ".png"), System.Drawing.Imaging.ImageFormat.Png);
                 }
+            }
+        }
+
+        // ---------------- autostart ----------------
+        const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+        string ReadRunValue() {
+            try {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKeyPath, false)) {
+                    if (k == null) return "";
+                    object v = k.GetValue("RightMenuGlass");
+                    return v == null ? "" : v.ToString();
+                }
+            } catch {
+                return "";
+            }
+        }
+
+        void LoadAutostartIntoUi() {
+            if (chkAutostart == null) return;
+            string val = ReadRunValue();
+            chkAutostart.Checked = val.Length > 0;
+            chkAutostartWatch.Checked = val.Length > 0 && val.IndexOf("watch", StringComparison.OrdinalIgnoreCase) >= 0;
+            UpdateAutostartEnabled();
+        }
+
+        void UpdateAutostartEnabled() {
+            if (chkAutostartWatch == null) return;
+            chkAutostartWatch.Enabled = chkAutostart.Checked;
+            if (!chkAutostart.Checked) chkAutostartWatch.Checked = false;
+        }
+
+        void StartWatchSilently() {
+            string exe = Path.Combine(appDir, "rmgctl.exe");
+            if (!File.Exists(exe)) return;
+            try {
+                ProcessStartInfo si = new ProcessStartInfo(exe, "watch --silent");
+                si.UseShellExecute = false;
+                si.CreateNoWindow = true;
+                Process p = Process.Start(si);
+                if (p != null) p.Dispose();
+            } catch {
+            }
+        }
+
+        // 只有和注册表里的现状不一致时才写，避免每次「保存并应用」都重写自启动项。
+        void ApplyAutostartFromUi() {
+            if (chkAutostart == null) return;
+            string cur = ReadRunValue();
+            bool curOn = cur.Length > 0;
+            bool curWatch = curOn && cur.IndexOf("watch", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool wantOn = chkAutostart.Checked;
+            bool wantWatch = chkAutostart.Checked && chkAutostartWatch.Checked;
+            if (!wantOn) {
+                if (curOn) RunCtl("uninstall", false);
+                if (curWatch) RunCtl("stop", false);
+                return;
+            }
+            if (!curOn || curWatch != wantWatch) {
+                RunCtl(wantWatch ? "install --watch" : "install", false);
+                if (wantWatch) StartWatchSilently();
+                else RunCtl("stop", false);
             }
         }
 

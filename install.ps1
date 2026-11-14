@@ -68,14 +68,27 @@ if ((Get-ChildItem $pluginDir -Filter *.json -ErrorAction SilentlyContinue | Mea
 
 if (-not $NoAutostart) {
     & $ctl install
+    # A logon scheduled task is started by the Task Scheduler service as soon as
+    # the user logs on; the HKCU Run key is only processed after explorer has
+    # finished initialising its shell, which can be 20-30 seconds later.
+    $isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        $tr = '"' + $ctl + '" once --silent'
+        & schtasks /create /tn 'RightMenuGlass' /tr $tr /sc onlogon /f 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host 'logon task created: the menu is ready as soon as the desktop appears'
+        } else {
+            Write-Host 'logon task could not be created; the Run key still works'
+        }
+    } else {
+        Write-Host 'tip: re-run this installer as administrator to also create a logon task (menu ready sooner)'
+    }
 }
 
 if (-not $NoRestart) {
     Write-Host 'restarting explorer.exe and injecting the DLL...'
+    # No resident watcher: the autostart entry runs "rmgctl once" at logon and exits.
     & $ctl restart
-    # Also start the watcher now so folders opened later get injected too.
-    & $ctl stop --silent | Out-Null
-    Start-Process $ctl -ArgumentList 'watch', '--silent' -WindowStyle Hidden
 } else {
     Write-Host 'skipped explorer restart; run:' ('"' + $ctl + '" restart')
 }

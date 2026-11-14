@@ -245,16 +245,17 @@ static void PrintUsage() {
     wprintf(L"RightMenuGlass control\n");
     wprintf(L"  rmgctl status  [dllpath]   list explorer processes and hook state\n");
     wprintf(L"  rmgctl inject  [dllpath]   inject into every explorer.exe process\n");
+    wprintf(L"  rmgctl once    [dllpath]   wait for explorer, inject once, then exit\n");
     wprintf(L"  rmgctl watch   [dllpath]   keep injecting new explorer.exe processes\n");
     wprintf(L"  rmgctl restart [dllpath]   restart explorer.exe so a new DLL takes effect\n");
     wprintf(L"  rmgctl uninject [dllpath]  unload the DLL from every explorer.exe process\n");
     wprintf(L"  rmgctl stop                stop background watch processes\n");
     wprintf(L"  rmgctl uninstall           remove autostart entry\n");
-    wprintf(L"  rmgctl install             add autostart entry (rmgctl watch)\n");
-    wprintf(L"options: --silent, --no-inject (restart only)\n");
+    wprintf(L"  rmgctl install [--watch]   add autostart entry (inject-once by default)\n");
+    wprintf(L"options: --silent, --watch, --no-inject (restart only)\n");
 }
 
-static bool SetAutoStart(bool enable) {
+static bool SetAutoStart(bool enable, bool watch) {
     HKEY key = NULL;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE,
                       &key) != ERROR_SUCCESS) {
@@ -262,7 +263,9 @@ static bool SetAutoStart(bool enable) {
     }
     LONG rc;
     if (enable) {
-        std::wstring cmd = L"\"" + ExeDir() + L"\\rmgctl.exe\" watch --silent";
+        // Default is "once": inject and exit, so nothing stays resident after logon.
+        std::wstring verb = watch ? L"watch" : L"once";
+        std::wstring cmd = L"\"" + ExeDir() + L"\\rmgctl.exe\" " + verb + L" --silent";
         rc = RegSetValueExW(key, L"RightMenuGlass", 0, REG_SZ, (const BYTE*)cmd.c_str(),
                             (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
     } else {
@@ -278,10 +281,13 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring dllPath;
     bool haveDllArg = false;
     bool noInject = false;
+    bool watchMode = false;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--silent") {
             g_silent = 1;
+        } else if (a == L"--watch") {
+            watchMode = true;
         } else if (a == L"--no-inject") {
             noInject = true;
         } else if (cmd.empty()) {
@@ -314,6 +320,21 @@ int wmain(int argc, wchar_t** argv) {
         int n = InjectAll(dllPath, !g_silent);
         if (!g_silent) wprintf(L"injected %d process(es)\n", n);
         return 0;
+    }
+    if (cmd == L"once") {
+        EnableDebugPrivilege();
+        // The Run key fires before the shell is fully up on slow logins, so wait for
+        // explorer instead of failing immediately. Bounded so a broken session cannot hang.
+        for (int waited = 0; waited < 90000; waited += 500) {
+            if (!FindProcesses(L"explorer.exe").empty()) {
+                int n = InjectAll(dllPath, !g_silent);
+                if (!g_silent) wprintf(L"injected %d process(es), exiting\n", n);
+                return 0;
+            }
+            Sleep(500);
+        }
+        if (!g_silent) wprintf(L"explorer.exe did not start within 90s, giving up\n");
+        return 2;
     }
     if (cmd == L"watch") {
         EnableDebugPrivilege();
@@ -371,15 +392,19 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (cmd == L"install") {
-        if (!SetAutoStart(true)) {
+        if (!SetAutoStart(true, watchMode)) {
             wprintf(L"failed to write autostart entry\n");
             return 3;
         }
-        wprintf(L"autostart installed: %ls\\rmgctl.exe watch --silent\n", ExeDir().c_str());
+        wprintf(L"autostart installed: %ls\\rmgctl.exe %ls --silent\n", ExeDir().c_str(),
+                watchMode ? L"watch" : L"once");
+        if (!watchMode) {
+            wprintf(L"mode: inject once at logon and exit (run rmgctl inject to redo it after an explorer restart)\n");
+        }
         return 0;
     }
     if (cmd == L"uninstall") {
-        SetAutoStart(false);
+        SetAutoStart(false, false);
         wprintf(L"autostart entry removed (running instance keeps working until explorer restarts)\n");
         return 0;
     }

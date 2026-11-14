@@ -47,10 +47,28 @@ Windows 的右键菜单由 `explorer.exe` 调用 `TrackPopupMenuEx` 弹出。Rig
 脚本会：
 
 1. 把 `bin` 里的文件复制到 `%LOCALAPPDATA%\Programs\RightMenuGlass`；
-2. 写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，让 `rmgctl.exe watch` 开机自启（它会盯着所有 explorer 进程，新开的窗口也自动注入）；
-3. 重启一次资源管理器并注入，立刻生效，同时在后台启动一个 `watch` 进程，之后新开的文件夹窗口自动接管。
+2. 写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，内容是 `rmgctl.exe once --silent`：登录后等 explorer 出现、注入一次就退出，**不留常驻进程**；
+3. 重启一次资源管理器并注入，立刻生效。
 
-不需要管理员权限：所有文件都在当前用户目录，注册表项也写在 HKCU。
+因为开机只注入一次，如果之后手动重启了资源管理器（任务管理器 → 重启资源管理器、或 explorer 崩溃重启），右键菜单会变回系统原生样式，点一下设置界面的「仅重新注入 DLL」或运行 `rmgctl.exe inject` 即可恢复。想让它在 explorer 重启时自动补注入，就改用常驻模式：
+
+    rmgctl.exe install --watch     # 自启动改为常驻监视（任务管理器里会多一个 rmgctl.exe）
+
+设置界面「常规 → 应用到资源管理器」里的两个勾选框对应的就是这两种模式，改完点「保存并应用」即可。
+
+### 让菜单在进入桌面时就已就绪（可选）
+
+`HKCU\...\Run` 是 explorer 自己读取的，要等它把 shell 初始化完才轮到（实测进入桌面后约 20–30 秒），这段时间内右键还是原生菜单。想让注入更早，用**管理员**身份创建一条登录计划任务（下面的命令在管理员命令提示符 `cmd` 里执行）：
+
+    schtasks /create /tn RightMenuGlass /tr "\"%LOCALAPPDATA%\Programs\RightMenuGlass\rmgctl.exe\" once --silent" /sc onlogon /f
+
+它和 Run 项做的是同一件事（跑一次 `once` 就退出，不留常驻进程），但由任务计划程序在登录瞬间触发，`once` 会在 explorer 出现后几百毫秒内完成注入。删除它：
+
+    schtasks /delete /tn RightMenuGlass /f
+
+用管理员身份运行 `install.ps1` 时脚本会自动创建这条任务；普通身份运行只会写 Run 项。
+
+安装本身不需要管理员权限：所有文件都在当前用户目录，注册表项也写在 HKCU；只有上面这条可选的登录计划任务需要提权。
 
 安装目录里：
 
@@ -69,8 +87,11 @@ Windows 的右键菜单由 `explorer.exe` 调用 `TrackPopupMenuEx` 弹出。Rig
     rmgctl.exe uninject      从 explorer 里卸载 DLL（不重启资源管理器）
     rmgctl.exe restart       重启资源管理器并注入（升级 DLL 后用）
     rmgctl.exe restart --no-inject  重启资源管理器但不注入
+    rmgctl.exe once          等 explorer 出现，注入一次后退出（自启动用的就是它）
+    rmgctl.exe watch         常驻监视，持续注入新出现的 explorer 进程
     rmgctl.exe stop          结束后台的 watch 进程
-    rmgctl.exe install       设置开机自启
+    rmgctl.exe install       设置开机自启（默认注入一次后退出）
+    rmgctl.exe install --watch  设置开机自启并常驻监视
     rmgctl.exe uninstall     取消开机自启
 
 ### 从源码构建
@@ -277,4 +298,6 @@ Windows 的右键菜单由 `explorer.exe` 调用 `TrackPopupMenuEx` 弹出。Rig
 - 新增：**展开方向**可自定义。设置 → 外观 → 展开方向，可选 右下（默认）/ 右上 / 左下 / 左上 / 自动；放不下时依然会自动翻到另一侧。「自动」按指针所在半屏决定朝哪边展开，效果就是"永远朝屏幕中央"。
 - 变更：发布包的默认设置换成作者日常调校的一套——模糊半径 10、不透明度 0（完全透明，只留模糊背景）、无噪点、过渡宽度 2、描边宽度 2、描边强度 30、呼出动画默认「优雅」（420 毫秒、起始缩放 93%、起始下移 12 像素）、顶栏高度 32、顶栏第六个按钮改为「设置」（rmgcfg），第三方菜单里默认把 7-Zip 那一组提到一级（合并名「常用工具」，没装 7-Zip 的机器上这条不生效）。两处例外：详细日志默认仍关闭（排查时才开），字体默认仍为 Microsoft YaHei UI（作者的「江城圆体」是机器上单独安装的字体，写进默认值会让别人的菜单回落到别的字体）。
 - 新增：**取色粒度**三档，取代原来的「逐像素判断」复选框（设置 → 文字 → 取色粒度）。「逐像素」保持原样，一个字内部也能一半黑一半白；「按字」让每个字只取一种颜色，取的是这个字所在区域的平均背景亮度，所以同一行里靠左的字可以是黑、靠右的字可以是白，但一个字不会被切成两种颜色——笔画细小的字体下比逐像素干净，可读性也更好；「整项同色」整个菜单项只用一个颜色，最统一。配置文件里对应 `colors.colorUnit`（pixel / glyph / item），旧的 `perPixel` 仍被读取以兼容老配置。
+- 变更：开机自启动改成**注入一次就退出**。注册表 Run 项现在是 `rmgctl.exe once --silent`：登录后它会等 explorer 出现，把 DLL 注入一次就自行结束，任务管理器里不会长期挂着一个 rmgctl.exe。代价是之后手动重启资源管理器（或 explorer 崩溃自动重启）会丢掉注入，此时点设置界面「仅重新注入 DLL」即可恢复。需要"explorer 重启时自动补注入"的老行为，用 `rmgctl.exe install --watch`，或在设置 → 常规 → 应用到资源管理器里勾上「常驻监视」。安装脚本也不再在后台拉起 watch 进程。
+- 新增：可选的**登录计划任务**，让注入更早。`HKCU\...\Run` 是 explorer 自己在 shell 初始化完之后才处理的（实测进入桌面后约 20–30 秒），这段时间右键还是原生菜单；改用管理员身份运行 `install.ps1`（或手动创建计划任务 `RightMenuGlass`，内容是 `rmgctl.exe once --silent`）后，任务计划程序在登录瞬间就触发它，进入桌面时菜单通常已经就绪。计划任务与 Run 项互相独立，删掉其中任意一个，另一个仍能工作。
 
