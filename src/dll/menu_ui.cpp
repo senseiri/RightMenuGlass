@@ -288,6 +288,30 @@ static void ConvertMenu(const MenuData& md, std::vector<UiItem>& out) {
     ConvertMenuRec(md, out);
 }
 
+// Some shell submenus ("New", "Give access to") are filled lazily: the real
+// items only appear after the owner window receives WM_INITMENUPOPUP.  We
+// never call the real TrackPopupMenu, so ask the owner ourselves and re-read.
+static void FillDeferredSubmenus(HWND owner, std::vector<UiItem>& items) {
+    if (!owner) return;
+    for (int i = 0; i < (int)items.size(); ++i) {
+        UiItem& u = items[i];
+        if (!u.d.sub) continue;
+        if (u.children.size() > 1) continue;
+        const bool placeholder = u.children.empty() || u.children[0].d.text == u.d.text ||
+                                 u.children[0].d.text.empty();
+        if (!placeholder) continue;
+        SendMessageW(owner, WM_INITMENUPOPUP, (WPARAM)u.d.sub, (LPARAM)MAKELONG(i, 0));
+        int before = (int)u.children.size();
+        MenuData sub;
+        if (BuildMenuData(u.d.sub, sub, false)) {
+            std::vector<UiItem> fresh;
+            ConvertMenuRec(sub, fresh);
+            if (fresh.size() > (size_t)before) u.children.swap(fresh);
+        }
+        LogW(L"fill deferred [%s] %d -> %d child(ren)", u.d.text.c_str(), before, (int)u.children.size());
+    }
+}
+
 // ------------------------------------------------------------
 //  third party folding
 // ------------------------------------------------------------
@@ -1645,6 +1669,7 @@ CustomMenuResult ShowCustomMenu(HMENU hmenu, const MenuData& data, int x, int y,
 
     std::vector<UiItem> items;
     ConvertMenu(data, items);
+    FillDeferredSubmenus(ui.owner, items);
     // Record what the shell actually offered so the settings UI can list the
     // real vendor entries instead of asking the user to type keywords.
     ObserveMenuItems(data.items);
