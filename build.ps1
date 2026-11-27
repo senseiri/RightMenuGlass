@@ -27,7 +27,9 @@ $files = Get-ChildItem $src -Filter *.cpp | Select-Object -ExpandProperty FullNa
 $defines = @('-DUNICODE', '-D_UNICODE', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-D_WIN32_WINNT=0x0A00')
 $include = @('-I' + $src)
 $cxxflags = @('-std=c++17', '-O2', '-Wall', '-Wno-unused-variable', '-Wno-unused-but-set-variable', '-municode')
-$linkflags = @('-shared', '-static-libgcc', '-static-libstdc++')
+# -static pulls libstdc++/libgcc/libwinpthread into the DLL: explorer must be able
+# to load it on machines that never had MinGW installed.
+$linkflags = @('-shared', '-static', '-static-libgcc', '-static-libstdc++')
 $libs = @('-luser32', '-lgdi32', '-lshell32', '-lshlwapi', '-lole32', '-loleaut32', '-luuid', '-lmsimg32', '-lpsapi', '-lshcore', '-ladvapi32', '-lcomctl32')
 
 $objs = @()

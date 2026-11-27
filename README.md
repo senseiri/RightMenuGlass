@@ -38,6 +38,8 @@ Windows 的右键菜单由 `explorer.exe` 调用 `TrackPopupMenuEx` 弹出。Rig
 
 需要 Windows 10/11（x64）。
 
+发布包里的三个程序都是**静态链接**的：`rmgctl.exe` 与 `MenuGlass.dll` 把 C++ 运行库（libstdc++ / libgcc / libwinpthread）全部打包在文件里，不依赖 MinGW 或 VC++ 运行库；剩下的 `api-ms-win-crt-*` 是 Windows 10 起系统自带的 UCRT；设置界面 `rmgcfg.exe` 用系统自带的 .NET Framework 4.8。换句话说，解压即用，不需要装任何额外组件。如果看到「找不到 libstdc++-6.dll」之类的报错，说明下载的是旧版本（v1.0.3 及更早）。
+
 ### 一键安装
 
 下载 Release 里的 `RightMenuGlass-<版本>-win-x64.zip`，解压后**双击 `install.cmd`** 即可（它只是用 `-ExecutionPolicy Bypass` 调 `install.ps1`）。也可以在工作副本里执行：
@@ -301,4 +303,5 @@ Windows 的右键菜单由 `explorer.exe` 调用 `TrackPopupMenuEx` 弹出。Rig
 - 变更：开机自启动改成**注入一次就退出**。注册表 Run 项现在是 `rmgctl.exe once --silent`：登录后它会等 explorer 出现，把 DLL 注入一次就自行结束，任务管理器里不会长期挂着一个 rmgctl.exe。代价是之后手动重启资源管理器（或 explorer 崩溃自动重启）会丢掉注入，此时点设置界面「仅重新注入 DLL」即可恢复。需要"explorer 重启时自动补注入"的老行为，用 `rmgctl.exe install --watch`，或在设置 → 常规 → 应用到资源管理器里勾上「常驻监视」。安装脚本也不再在后台拉起 watch 进程。
 - 新增：可选的**登录计划任务**，让注入更早。`HKCU\...\Run` 是 explorer 自己在 shell 初始化完之后才处理的（实测进入桌面后约 20–30 秒），这段时间右键还是原生菜单；改用管理员身份运行 `install.ps1`（或手动创建计划任务 `RightMenuGlass`，内容是 `rmgctl.exe once --silent`）后，任务计划程序在登录瞬间就触发它，进入桌面时菜单通常已经就绪。计划任务与 Run 项互相独立，删掉其中任意一个，另一个仍能工作。
 - 修复：**「新建」之类的子菜单里只剩一项、点了没反应**。Windows 自己的右键菜单是延迟填充的——「新建」「授予访问权限」这类子菜单在弹出前只有一个占位项，要等菜单窗口收到 `WM_INITMENUPOPUP` 才真正生成内容（新建里本该是文件夹、文本文档、快捷方式等一长串）。这个程序不调用系统菜单，所以那次填充从来没发生过，点「新建」只能看到一个和父项同名的「新建(W)」，于是失效。现在弹出前会替系统补发 `WM_INITMENUPOPUP` 并重新读一遍菜单：新建从 1 项恢复成 13 项，授予访问权限从 1 项恢复成 2 项。
+- 修复：**换一台电脑运行时报「找不到 libstdc++-6.dll」**。之前的 `rmgctl.exe` 是动态链接 MinGW 运行库的，只有装过编译器的机器才能启动；`MenuGlass.dll` 也还挂着 `libwinpthread-1.dll`。现在两个二进制都用 `-static` 静态链接，导入表里只剩 Windows 系统 DLL 与 `api-ms-win-crt-*`（Win10 起自带），换台干净机器直接可用。设置界面 `rmgcfg.exe` 一直是 .NET Framework 4.8，不受影响。
 

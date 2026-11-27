@@ -10,6 +10,8 @@ $cxxflags = @('-std=c++17', '-O2', '-municode')
 $libs = @('-luser32', '-ladvapi32', '-lpsapi')
 $exe = Join-Path $out 'rmgctl.exe'
 $src = Join-Path $root 'src\host\rmgctl.cpp'
-& $gxx @cxxflags @defines $src -o $exe @libs
+# -static keeps libstdc++/libgcc/libwinpthread inside the exe so the release
+# runs on machines without MinGW installed.
+& $gxx @cxxflags @defines $src -o $exe -static @libs
 if ($LASTEXITCODE -ne 0) { throw 'host build failed' }
 Write-Host "OK: $exe"
